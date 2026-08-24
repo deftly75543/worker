@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -90,13 +91,15 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 		}
 	}
 
-	// اگر فایل بزرگتر از 8 مگابایت بود و سرور از Range پشتیبانی می‌کرد، از دانلود موازی چندکاناله استفاده می‌کنیم
-	if contentLength > 8*1024*1024 && acceptRanges {
-		numThreads := 8
-		if contentLength > 100*1024*1024 {
-			numThreads = 12
+	// تنظیم مقیاس‌پذیر و پایدار تعداد کانکشن‌های موازی براساس حجم فایل جهت دستیابی به ۲۰ الی ۳۰+ مگابایت بر ثانیه
+	if contentLength > 6*1024*1024 && acceptRanges {
+		numThreads := 12
+		if contentLength > 80*1024*1024 {
+			numThreads = 24
+		} else if contentLength > 25*1024*1024 {
+			numThreads = 16
 		}
-		Logger.Info("DOWNLOADER", token, "Turbo Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
+		Logger.Info("DOWNLOADER", token, "Turbo Extreme Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
 			numThreads, float64(contentLength)/(1024*1024))
 
 		err := downloadMultiThread(ctx, streamURL, destPath, contentLength, numThreads, timeout, token, label, onProgress)
@@ -129,11 +132,24 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 	chunkSize := totalSize / int64(numThreads)
 
 	transport := &http.Transport{
-		MaxIdleConns:        numThreads * 2,
-		MaxIdleConnsPerHost: numThreads * 2,
-		IdleConnTimeout:     30 * time.Second,
-		DisableCompression:  true,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          numThreads * 4,
+		MaxIdleConnsPerHost:   numThreads * 2,
+		MaxConnsPerHost:       numThreads * 2,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:   true,
+		ReadBufferSize:        128 * 1024,
+		WriteBufferSize:       128 * 1024,
 	}
+	defer transport.CloseIdleConnections()
+
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   timeout,
@@ -212,7 +228,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 					continue
 				}
 
-				buf := make([]byte, 64*1024)
+				buf := make([]byte, 128*1024)
 				currentOffset := startByte
 
 				for {
@@ -289,8 +305,22 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 	}
 	defer out.Close()
 
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,
+		ReadBufferSize:      128 * 1024,
+		WriteBufferSize:     128 * 1024,
+	}
+	defer transport.CloseIdleConnections()
+
 	client := &http.Client{
-		Timeout: timeout,
+		Transport: transport,
+		Timeout:   timeout,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
