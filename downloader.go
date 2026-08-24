@@ -47,7 +47,6 @@ func (pt *ProgressTracker) Write(p []byte) (int, error) {
 }
 
 func DownloadStream(ctx context.Context, streamURL, destPath string, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
-	startTime := time.Now()
 	Logger.Info("DOWNLOADER", token, "Initiating high-speed download for %s -> %s", label, destPath)
 
 	// مرحله ۱: استعلام هدرها و سایز فایل
