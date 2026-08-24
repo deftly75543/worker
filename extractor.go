@@ -31,15 +31,21 @@ type RapidAPIVideoItem struct {
 type RapidAPIAudioItem struct {
 	Quality      string `json:"quality"`
 	URL          string `json:"url"`
+	Link         string `json:"link"`
+	DownloadURL  string `json:"downloadUrl"`
 	Language     string `json:"language"`
 	LanguageCode string `json:"languageCode"`
 	DisplayName  string `json:"displayName"`
+	Name         string `json:"name"`
+	Label        string `json:"label"`
 	IsOriginal   bool   `json:"isOriginal"`
 	IsDefault    bool   `json:"isDefault"`
 	AudioTrack   struct {
 		ID             string `json:"id"`
 		DisplayName    string `json:"displayName"`
+		Name           string `json:"name"`
 		AudioIsDefault bool   `json:"audioIsDefault"`
+		IsDefault      bool   `json:"isDefault"`
 	} `json:"audioTrack"`
 }
 
@@ -53,6 +59,9 @@ type RapidAPIDetailsResponse struct {
 	Audios struct {
 		Items []RapidAPIAudioItem `json:"items"`
 	} `json:"audios"`
+	Audio struct {
+		Items []RapidAPIAudioItem `json:"items"`
+	} `json:"audio"`
 }
 
 func parseFPS(val any) int {
@@ -300,11 +309,25 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 			title = "YouTube Video " + videoID
 		}
 
+		allAudios := data.Audios.Items
+		if len(allAudios) == 0 {
+			allAudios = data.Audio.Items
+		}
+		for i := range allAudios {
+			if allAudios[i].URL == "" {
+				if allAudios[i].Link != "" {
+					allAudios[i].URL = allAudios[i].Link
+				} else if allAudios[i].DownloadURL != "" {
+					allAudios[i].URL = allAudios[i].DownloadURL
+				}
+			}
+		}
+
 		Logger.Info("EXTRACTOR", token, "Extracted Title: '%s', Channel: '%s', Duration: %v sec, Videos: %d, Audios: %d",
-			title, data.ChannelTitle, data.LengthSeconds, len(data.Videos.Items), len(data.Audios.Items))
+			title, data.ChannelTitle, data.LengthSeconds, len(data.Videos.Items), len(allAudios))
 
 		// انتخاب هوشمند ترک صوتی بر اساس درخواست کاربر یا اولویت فارسی/اصلی
-		bestAudioURL, selectedLangName := selectBestAudioStream(data.Audios.Items, audioLang, token)
+		bestAudioURL, selectedLangName := selectBestAudioStream(allAudios, audioLang, token)
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
