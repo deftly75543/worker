@@ -99,14 +99,19 @@ func processTask(payload TaskPayload) {
 
 	if extracted.Type == "audio" {
 		audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp3", cleanToken))
-		if err := DownloadStream(extracted.AudioURL, audioPath, 15*time.Minute, token, "Audio Stream"); err != nil {
+		onAudioProgress := func(written, total int64, speedMBs float64, percent int) {
+			mappedPercent := 20 + int(float64(percent)*0.70)
+			UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دانلود فایل صوتی MP3")
+		}
+
+		if err := DownloadStream(extracted.AudioURL, audioPath, 15*time.Minute, token, "Audio Stream", onAudioProgress); err != nil {
 			Logger.Error("TASK", token, "Audio stream download FAILED: %v", err)
 			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل صوتی: "+err.Error(), token)
 			if payload.MasterCallbackURL != "" {
 				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 					"action":            "error",
 					"secret":            payload.Secret,
-					"chat_id":           payload.ChatID,
+					"chat_id":           FormatChatID(payload.ChatID),
 					"status_message_id": payload.StatusMessageID,
 					"error":             err.Error(),
 				}, token)
@@ -116,14 +121,19 @@ func processTask(payload TaskPayload) {
 		downloadedFile = audioPath
 	} else {
 		videoPath := filepath.Join(downloadDir, fmt.Sprintf("%s_v.mp4", cleanToken))
-		if err := DownloadStream(extracted.VideoURL, videoPath, 20*time.Minute, token, "Video Stream"); err != nil {
+		onVideoProgress := func(written, total int64, speedMBs float64, percent int) {
+			mappedPercent := 20 + int(float64(percent)*0.60)
+			UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دانلود پرسرعت استریم")
+		}
+
+		if err := DownloadStream(extracted.VideoURL, videoPath, 25*time.Minute, token, "Video Stream", onVideoProgress); err != nil {
 			Logger.Error("TASK", token, "Video stream download FAILED: %v", err)
 			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+err.Error(), token)
 			if payload.MasterCallbackURL != "" {
 				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 					"action":            "error",
 					"secret":            payload.Secret,
-					"chat_id":           payload.ChatID,
+					"chat_id":           FormatChatID(payload.ChatID),
 					"status_message_id": payload.StatusMessageID,
 					"error":             err.Error(),
 				}, token)
@@ -133,7 +143,13 @@ func processTask(payload TaskPayload) {
 
 		if extracted.AudioURL != "" && !extracted.HasAudio {
 			audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s_a.m4a", cleanToken))
-			if err := DownloadStream(extracted.AudioURL, audioPath, 10*time.Minute, token, "DASH Separate Audio"); err == nil {
+			onDashAudioProgress := func(written, total int64, speedMBs float64, percent int) {
+				mappedPercent := 80 + int(float64(percent)*0.08)
+				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دریافت استریم صوتی HD")
+			}
+
+			if err := DownloadStream(extracted.AudioURL, audioPath, 10*time.Minute, token, "DASH Separate Audio", onDashAudioProgress); err == nil {
+				UpdateProgress(payload, formatLabel, 90, "در حال ادغام صدا و ویدیو با کیفیت اصلی")
 				mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
 				if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
 					_ = os.Remove(videoPath)
@@ -152,8 +168,8 @@ func processTask(payload TaskPayload) {
 		}
 	}
 
-	// Step 3: 100% Uploading
-	UpdateProgress(payload, formatLabel, 100, "در حال آپلود در تلگرام")
+	// Step 3: 95% Uploading
+	UpdateProgress(payload, formatLabel, 95, "در حال آپلود و ارسال در تلگرام")
 
 	var thumbPath string
 	if extracted.Type == "video" {
@@ -172,7 +188,7 @@ func processTask(payload TaskPayload) {
 			SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 				"action":            "error",
 				"secret":            payload.Secret,
-				"chat_id":           payload.ChatID,
+				"chat_id":           FormatChatID(payload.ChatID),
 				"status_message_id": payload.StatusMessageID,
 				"error":             err.Error(),
 			}, token)
@@ -181,13 +197,14 @@ func processTask(payload TaskPayload) {
 	}
 
 	// Delete status message
-	if payload.BotToken != "" && payload.ChatID != nil && payload.StatusMessageID != 0 {
-		delURL := fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage?chat_id=%v&message_id=%d", payload.BotToken, payload.ChatID, payload.StatusMessageID)
+	targetChatID := FormatChatID(payload.ChatID)
+	if payload.BotToken != "" && targetChatID != "" && payload.StatusMessageID != 0 {
+		delURL := fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage?chat_id=%s&message_id=%d", payload.BotToken, targetChatID, payload.StatusMessageID)
 		delResp, delErr := http.Get(delURL)
 		if delErr == nil && delResp != nil {
 			delResp.Body.Close()
 		}
-		Logger.Debug("TASK", token, "Requested deletion of status message %d", payload.StatusMessageID)
+		Logger.Debug("TASK", token, "Requested deletion of status message %d in chat %s", payload.StatusMessageID, targetChatID)
 	}
 
 	// Complete callback to Master
@@ -195,7 +212,7 @@ func processTask(payload TaskPayload) {
 		SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 			"action":            "complete",
 			"secret":            payload.Secret,
-			"chat_id":           payload.ChatID,
+			"chat_id":           targetChatID,
 			"status_message_id": payload.StatusMessageID,
 			"video_id":          payload.VideoID,
 			"quality":           payload.Quality,

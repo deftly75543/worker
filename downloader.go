@@ -9,7 +9,39 @@ import (
 	"time"
 )
 
-func DownloadStream(streamURL, destPath string, timeout time.Duration, token, label string) error {
+type ProgressTracker struct {
+	Total      int64
+	Written    int64
+	StartTime  time.Time
+	LastUpdate time.Time
+	LastSpeed  float64
+	OnProgress func(written, total int64, speedMBs float64, percent int)
+}
+
+func (pt *ProgressTracker) Write(p []byte) (int, error) {
+	n := len(p)
+	pt.Written += int64(n)
+
+	now := time.Now()
+	if pt.OnProgress != nil && (now.Sub(pt.LastUpdate) >= 2000*time.Millisecond || (pt.Total > 0 && pt.Written == pt.Total)) {
+		elapsed := now.Sub(pt.StartTime).Seconds()
+		if elapsed > 0 {
+			pt.LastSpeed = (float64(pt.Written) / (1024 * 1024)) / elapsed
+		}
+		percent := 0
+		if pt.Total > 0 {
+			percent = int((float64(pt.Written) / float64(pt.Total)) * 100)
+			if percent > 100 {
+				percent = 100
+			}
+		}
+		pt.LastUpdate = now
+		pt.OnProgress(pt.Written, pt.Total, pt.LastSpeed, percent)
+	}
+	return n, nil
+}
+
+func DownloadStream(streamURL, destPath string, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
 	startTime := time.Now()
 	Logger.Info("DOWNLOADER", token, "Starting download of %s -> %s", label, destPath)
 
@@ -50,7 +82,15 @@ func DownloadStream(streamURL, destPath string, timeout time.Duration, token, la
 		Logger.Info("DOWNLOADER", token, "%s stream is chunked / dynamic size", label)
 	}
 
-	written, err := io.Copy(out, resp.Body)
+	tracker := &ProgressTracker{
+		Total:      contentLength,
+		StartTime:  startTime,
+		LastUpdate: time.Now(),
+		OnProgress: onProgress,
+	}
+
+	writer := io.MultiWriter(out, tracker)
+	written, err := io.Copy(writer, resp.Body)
 	elapsed := time.Since(startTime)
 	if err != nil {
 		Logger.Error("DOWNLOADER", token, "Error while streaming %s after %v (written %.2f MB): %v",

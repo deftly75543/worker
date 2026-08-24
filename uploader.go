@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,22 +29,56 @@ type TaskPayload struct {
 	Secret            string `json:"secret"`
 }
 
+var (
+	lastMsgEditMu sync.Mutex
+	lastMsgEdit   = make(map[string]time.Time)
+)
+
+func FormatChatID(chatID any) string {
+	if chatID == nil {
+		return ""
+	}
+	switch v := chatID.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case float32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int:
+		return strconv.Itoa(v)
+	case json.Number:
+		return v.String()
+	default:
+		s := fmt.Sprintf("%v", v)
+		if strings.Contains(s, "e+") || strings.Contains(s, "E+") {
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return strconv.FormatInt(int64(f), 10)
+			}
+		}
+		return s
+	}
+}
+
 func UpdateTelegramMessage(botToken string, chatID any, messageID int, text, token string) {
-	if botToken == "" || chatID == nil || messageID == 0 {
+	targetChatID := FormatChatID(chatID)
+	if botToken == "" || targetChatID == "" || messageID == 0 {
 		return
 	}
 
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken)
 	form := url.Values{}
-	form.Set("chat_id", fmt.Sprintf("%v", chatID))
+	form.Set("chat_id", targetChatID)
 	form.Set("message_id", strconv.Itoa(messageID))
 	form.Set("text", text)
 	form.Set("parse_mode", "HTML")
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.PostForm(apiURL, form)
 	if err != nil {
-		Logger.Warn("TELEGRAM", token, "Failed to edit message %d: %v", messageID, err)
+		Logger.Warn("TELEGRAM", token, "Failed to edit message %d (Chat: %s): %v", messageID, targetChatID, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -55,6 +90,9 @@ func UpdateTelegramMessage(botToken string, chatID any, messageID int, text, tok
 
 func UpdateProgress(payload TaskPayload, formatLabel string, percent int, statusText string) {
 	filled := percent / 10
+	if filled > 10 {
+		filled = 10
+	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
 
 	msg := fmt.Sprintf("⚡ <b>%s (%s)</b>\n\n📊 <code>[%s] %d%%</code>\n🚀 <i>لطفاً کمی شکیبا باشید...</i>",
@@ -65,15 +103,50 @@ func UpdateProgress(payload TaskPayload, formatLabel string, percent int, status
 	if payload.MasterCallbackURL != "" {
 		callbackData := map[string]any{
 			"action":            "progress",
-			"step":              "downloading",
+			"step":              "processing",
 			"secret":            payload.Secret,
-			"chat_id":           payload.ChatID,
+			"chat_id":           FormatChatID(payload.ChatID),
 			"status_message_id": payload.StatusMessageID,
 			"format_label":      formatLabel,
 			"percent":           percent,
 		}
 		SendMasterCallback(payload.MasterCallbackURL, callbackData, payload.TaskToken)
 	}
+}
+
+func UpdateLiveDownloadProgress(payload TaskPayload, formatLabel string, stagePercent int, writtenBytes, totalBytes int64, speedMBs float64, stageText string) {
+	token := payload.TaskToken
+
+	// کنترل نرخ درخواست جهت احترام به Rate Limit تلگرام (حداقل ۲ ثانیه بین هر ادیت)
+	lastMsgEditMu.Lock()
+	lastTime, exists := lastMsgEdit[token]
+	if exists && time.Since(lastTime) < 2200*time.Millisecond && stagePercent < 100 {
+		lastMsgEditMu.Unlock()
+		return
+	}
+	lastMsgEdit[token] = time.Now()
+	lastMsgEditMu.Unlock()
+
+	filled := stagePercent / 10
+	if filled > 10 {
+		filled = 10
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
+
+	var sizeDetails string
+	if totalBytes > 0 {
+		curMB := float64(writtenBytes) / (1024 * 1024)
+		totMB := float64(totalBytes) / (1024 * 1024)
+		sizeDetails = fmt.Sprintf("📥 <b>دانلود شده:</b> <code>%.1f MB / %.1f MB</code>\n⚡ <b>سرعت دانلود:</b> <code>%.2f MB/s</code>", curMB, totMB, speedMBs)
+	} else if writtenBytes > 0 {
+		curMB := float64(writtenBytes) / (1024 * 1024)
+		sizeDetails = fmt.Sprintf("📥 <b>دانلود شده:</b> <code>%.1f MB</code>\n⚡ <b>سرعت دانلود:</b> <code>%.2f MB/s</code>", curMB, speedMBs)
+	}
+
+	msg := fmt.Sprintf("⚡ <b>%s (%s)</b>\n\n📊 <code>[%s] %d%%</code>\n%s\n\n🚀 <i>لطفاً کمی شکیبا باشید...</i>",
+		stageText, formatLabel, bar, stagePercent, sizeDetails)
+
+	UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, msg, token)
 }
 
 func SendMasterCallback(callbackURL string, data map[string]any, token string) {
@@ -114,6 +187,7 @@ func escapeHTML(s string) string {
 
 func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, title string, isAudio bool) (string, error) {
 	token := payload.TaskToken
+	targetChatID := FormatChatID(payload.ChatID)
 	startTime := time.Now()
 
 	file, err := os.Open(filePath)
@@ -158,13 +232,13 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	}
 
 	urlEndpoint := fmt.Sprintf("%s/bot%s/%s", apiBase, payload.BotToken, method)
-	Logger.Info("UPLOADER", token, "Initiating multipart upload -> %s (Size: %.2f MB, Method: %s, Local: %v)",
-		urlEndpoint, sizeMB, method, isLocal)
+	Logger.Info("UPLOADER", token, "Initiating multipart upload -> %s (Size: %.2f MB, Method: %s, TargetChat: %s, Local: %v)",
+		urlEndpoint, sizeMB, method, targetChatID, isLocal)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	_ = writer.WriteField("chat_id", fmt.Sprintf("%v", payload.ChatID))
+	_ = writer.WriteField("chat_id", targetChatID)
 	_ = writer.WriteField("caption", caption)
 	_ = writer.WriteField("parse_mode", "HTML")
 	if isAudio {
