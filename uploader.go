@@ -28,7 +28,7 @@ type TaskPayload struct {
 	Secret            string `json:"secret"`
 }
 
-func UpdateTelegramMessage(botToken string, chatID any, messageID int, text string) {
+func UpdateTelegramMessage(botToken string, chatID any, messageID int, text, token string) {
 	if botToken == "" || chatID == nil || messageID == 0 {
 		return
 	}
@@ -40,8 +40,17 @@ func UpdateTelegramMessage(botToken string, chatID any, messageID int, text stri
 	form.Set("text", text)
 	form.Set("parse_mode", "HTML")
 
-	client := &http.Client{Timeout: 4 * time.Second}
-	_, _ = client.PostForm(apiURL, form)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.PostForm(apiURL, form)
+	if err != nil {
+		Logger.Warn("TELEGRAM", token, "Failed to edit message %d: %v", messageID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		Logger.Debug("TELEGRAM", token, "Edit message returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
 }
 
 func UpdateProgress(payload TaskPayload, formatLabel string, percent int, statusText string) {
@@ -51,7 +60,7 @@ func UpdateProgress(payload TaskPayload, formatLabel string, percent int, status
 	msg := fmt.Sprintf("⚡ <b>%s (%s)</b>\n\n📊 <code>[%s] %d%%</code>\n🚀 <i>لطفاً کمی شکیبا باشید...</i>",
 		statusText, formatLabel, bar, percent)
 
-	UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, msg)
+	UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, msg, payload.TaskToken)
 
 	if payload.MasterCallbackURL != "" {
 		callbackData := map[string]any{
@@ -63,17 +72,37 @@ func UpdateProgress(payload TaskPayload, formatLabel string, percent int, status
 			"format_label":      formatLabel,
 			"percent":           percent,
 		}
-		SendMasterCallback(payload.MasterCallbackURL, callbackData)
+		SendMasterCallback(payload.MasterCallbackURL, callbackData, payload.TaskToken)
 	}
 }
 
-func SendMasterCallback(callbackURL string, data map[string]any) {
+func SendMasterCallback(callbackURL string, data map[string]any, token string) {
 	if callbackURL == "" {
 		return
 	}
-	body, _ := json.Marshal(data)
-	client := &http.Client{Timeout: 5 * time.Second}
-	_, _ = client.Post(callbackURL, "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(data)
+	if err != nil {
+		Logger.Error("CALLBACK", token, "Failed to marshal master callback payload: %v", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 7 * time.Second}
+	startTime := time.Now()
+	resp, err := client.Post(callbackURL, "application/json", bytes.NewReader(body))
+	elapsed := time.Since(startTime)
+
+	action := fmt.Sprintf("%v", data["action"])
+	if err != nil {
+		Logger.Warn("CALLBACK", token, "Master callback ('%s') failed after %v: %v", action, elapsed, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		Logger.Warn("CALLBACK", token, "Master callback ('%s') returned HTTP %d in %v", action, resp.StatusCode, elapsed)
+	} else {
+		Logger.Debug("CALLBACK", token, "Master callback ('%s') dispatched successfully in %v", action, elapsed)
+	}
 }
 
 func escapeHTML(s string) string {
@@ -84,14 +113,19 @@ func escapeHTML(s string) string {
 }
 
 func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, title string, isAudio bool) (string, error) {
+	token := payload.TaskToken
+	startTime := time.Now()
+
 	file, err := os.Open(filePath)
 	if err != nil {
+		Logger.Error("UPLOADER", token, "Failed to open file for upload %s: %v", filePath, err)
 		return "", err
 	}
 	defer file.Close()
 
 	fi, err := file.Stat()
 	if err != nil {
+		Logger.Error("UPLOADER", token, "Failed to stat file %s: %v", filePath, err)
 		return "", err
 	}
 	sizeMB := float64(fi.Size()) / (1024 * 1024)
@@ -102,16 +136,18 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	caption := fmt.Sprintf("✅ <b>دانلود با موفقیت انجام شد</b>\n\n🎬 عنوان: <b>%s</b>\n📁 کیفیت: <code>%s</code>\n📦 حجم فایل: <code>%.2f MB</code>\n\n⚡ <i>ارسال شده توسط ربات دانلود از یوتیوب</i>",
 		safeTitle, safeFormat, sizeMB)
 
-
 	// بررسی سرور محلی تلگرام (پورت 8081 برای آپلودهای تا ۲ گیگابایت)
 	apiBase := "http://127.0.0.1:8081"
-	testClient := &http.Client{Timeout: 400 * time.Millisecond}
-	resp, err := testClient.Get(apiBase)
-	if err != nil || (resp != nil && resp.StatusCode >= 500) {
-		apiBase = "https://api.telegram.org"
-	}
-	if resp != nil {
+	testClient := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, testErr := testClient.Get(apiBase)
+	isLocal := false
+	if testErr == nil && resp != nil && resp.StatusCode < 500 {
+		isLocal = true
 		resp.Body.Close()
+		Logger.Info("UPLOADER", token, "Local Telegram Bot API server detected on :8081 (2GB upload enabled)")
+	} else {
+		apiBase = "https://api.telegram.org"
+		Logger.Warn("UPLOADER", token, "Local Telegram Bot API is unavailable (err: %v). Falling back to official cloud API (50MB cap)", testErr)
 	}
 
 	method := "sendVideo"
@@ -122,6 +158,8 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	}
 
 	urlEndpoint := fmt.Sprintf("%s/bot%s/%s", apiBase, payload.BotToken, method)
+	Logger.Info("UPLOADER", token, "Initiating multipart upload -> %s (Size: %.2f MB, Method: %s, Local: %v)",
+		urlEndpoint, sizeMB, method, isLocal)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -136,13 +174,14 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		_ = writer.WriteField("supports_streaming", "true")
 	}
 
-
-	// File
+	// File stream
 	part, err := writer.CreateFormFile(field, filepath.Base(filePath))
 	if err != nil {
+		Logger.Error("UPLOADER", token, "Failed to create form file field '%s': %v", field, err)
 		return "", err
 	}
 	if _, err := io.Copy(part, file); err != nil {
+		Logger.Error("UPLOADER", token, "Failed to copy file data to multipart buffer: %v", err)
 		return "", err
 	}
 
@@ -151,29 +190,41 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		if thumbFile, err := os.Open(thumbPath); err == nil {
 			if thumbPart, err := writer.CreateFormFile("thumbnail", filepath.Base(thumbPath)); err == nil {
 				_, _ = io.Copy(thumbPart, thumbFile)
+				Logger.Debug("UPLOADER", token, "Attached thumbnail to video upload: %s", thumbPath)
 			}
 			thumbFile.Close()
 		}
 	}
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		Logger.Error("UPLOADER", token, "Failed to finalize multipart writer: %v", err)
+		return "", err
+	}
 
 	req, err := http.NewRequest("POST", urlEndpoint, body)
 	if err != nil {
+		Logger.Error("UPLOADER", token, "Failed to create POST request: %v", err)
 		return "", err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	uploadClient := &http.Client{Timeout: 30 * time.Minute}
+	uploadClient := &http.Client{Timeout: 35 * time.Minute}
 	upResp, err := uploadClient.Do(req)
+	uploadElapsed := time.Since(startTime)
+
 	if err != nil {
+		Logger.Error("UPLOADER", token, "Upload HTTP request failed after %v: %v", uploadElapsed, err)
 		return "", err
 	}
 	defer upResp.Body.Close()
 
+	respRaw, _ := io.ReadAll(upResp.Body)
+
 	var resData struct {
-		OK     bool `json:"ok"`
-		Result struct {
+		OK          bool   `json:"ok"`
+		ErrorCode   int    `json:"error_code"`
+		Description string `json:"description"`
+		Result      struct {
 			Video struct {
 				FileID string `json:"file_id"`
 			} `json:"video"`
@@ -185,9 +236,9 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 			} `json:"document"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(upResp.Body).Decode(&resData)
+	_ = json.Unmarshal(respRaw, &resData)
 
-	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 && resData.OK {
 		fileID := resData.Result.Video.FileID
 		if fileID == "" {
 			fileID = resData.Result.Audio.FileID
@@ -195,8 +246,19 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		if fileID == "" {
 			fileID = resData.Result.Document.FileID
 		}
+
+		speedMBs := sizeMB / uploadElapsed.Seconds()
+		Logger.Info("UPLOADER", token, "Upload SUCCESS in %v (avg: %.2f MB/s). FileID: %s",
+			uploadElapsed.Round(time.Millisecond), speedMBs, fileID)
 		return fileID, nil
 	}
-	return "", fmt.Errorf("upload returned status %d", upResp.StatusCode)
+
+	errorMsg := fmt.Sprintf("Telegram upload failed (HTTP %d, Code: %d, Description: %s)",
+		upResp.StatusCode, resData.ErrorCode, resData.Description)
+	if resData.Description == "" {
+		errorMsg = fmt.Sprintf("Telegram upload failed (HTTP %d): %s", upResp.StatusCode, string(respRaw))
+	}
+	Logger.Error("UPLOADER", token, "%s", errorMsg)
+	return "", fmt.Errorf("%s", errorMsg)
 }
 

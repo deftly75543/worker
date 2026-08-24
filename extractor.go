@@ -95,20 +95,27 @@ func extractVideoID(rawURL string) string {
 }
 
 
-func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
+func ExtractFromRapidAPI(rawURL, quality, token string) (*ExtractedMedia, error) {
 	videoID := extractVideoID(rawURL)
 	if videoID == "" {
+		Logger.Error("EXTRACTOR", token, "Invalid YouTube URL provided: %s", rawURL)
 		return nil, fmt.Errorf("invalid youtube url: %s", rawURL)
 	}
 
+	Logger.Info("EXTRACTOR", token, "Starting extraction for VideoID: %s, Requested Quality: %s", videoID, quality)
+
 	keys := getRapidAPIKeys()
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: 25 * time.Second}
 
 	var lastErr error
-	for _, key := range keys {
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Debug("EXTRACTOR", token, "Trying RapidAPI key #%d (%s)", idx+1, maskedKey)
+
 		reqURL := fmt.Sprintf("https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=%s", url.QueryEscape(videoID))
 		req, err := http.NewRequest("GET", reqURL, nil)
 		if err != nil {
+			Logger.Warn("EXTRACTOR", token, "Failed to create HTTP request for key #%d: %v", idx+1, err)
 			lastErr = err
 			continue
 		}
@@ -116,14 +123,19 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 		req.Header.Set("x-rapidapi-key", key)
 		req.Header.Set("Accept", "application/json")
 
+		startTime := time.Now()
 		resp, err := client.Do(req)
+		elapsed := time.Since(startTime)
+
 		if err != nil {
+			Logger.Warn("EXTRACTOR", token, "RapidAPI request error with key #%d after %v: %v", idx+1, elapsed, err)
 			lastErr = err
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
+			Logger.Warn("EXTRACTOR", token, "RapidAPI returned HTTP %d with key #%d in %v", resp.StatusCode, idx+1, elapsed)
 			lastErr = fmt.Errorf("rapidapi returned HTTP %d", resp.StatusCode)
 			continue
 		}
@@ -132,6 +144,7 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 		err = json.NewDecoder(resp.Body).Decode(&data)
 		resp.Body.Close()
 		if err != nil {
+			Logger.Warn("EXTRACTOR", token, "JSON decode error from RapidAPI with key #%d: %v", idx+1, err)
 			lastErr = err
 			continue
 		}
@@ -141,19 +154,27 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 			title = "YouTube Video " + videoID
 		}
 
+		Logger.Info("EXTRACTOR", token, "Extracted Title: '%s', Channel: '%s', Duration: %v sec, Videos: %d, Audios: %d",
+			title, data.ChannelTitle, data.LengthSeconds, len(data.Videos.Items), len(data.Audios.Items))
+
 		// Best audio stream
 		var bestAudioURL string
 		if len(data.Audios.Items) > 0 {
 			bestAudioURL = data.Audios.Items[0].URL
+			Logger.Debug("EXTRACTOR", token, "Found best audio stream quality: %s", data.Audios.Items[0].Quality)
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
-		if isAudioOnly && bestAudioURL != "" {
-			return &ExtractedMedia{
-				Type:     "audio",
-				Title:    title,
-				AudioURL: bestAudioURL,
-			}, nil
+		if isAudioOnly {
+			if bestAudioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Audio-only requested. Successfully matched audio stream.")
+				return &ExtractedMedia{
+					Type:     "audio",
+					Title:    title,
+					AudioURL: bestAudioURL,
+				}, nil
+			}
+			Logger.Warn("EXTRACTOR", token, "Audio requested but no audio stream found in RapidAPI response")
 		}
 
 		// Find matching video stream
@@ -177,6 +198,8 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 
 		var targetVideoURL string
 		var hasAudio bool
+		var selectedQuality string
+		var selectedFPS any
 
 		for _, v := range data.Videos.Items {
 			if v.URL == "" {
@@ -188,26 +211,35 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 					if targetVideoURL == "" {
 						targetVideoURL = v.URL
 						hasAudio = v.HasAudio
+						selectedQuality = v.Quality
+						selectedFPS = v.FPS
 					}
 					continue
 				}
 				targetVideoURL = v.URL
 				hasAudio = v.HasAudio
+				selectedQuality = v.Quality
+				selectedFPS = v.FPS
 				break
 			}
-
 		}
 
 		// Fallback to highest quality available if specific height not found
 		if targetVideoURL == "" && len(data.Videos.Items) > 0 {
 			targetVideoURL = data.Videos.Items[0].URL
 			hasAudio = data.Videos.Items[0].HasAudio
+			selectedQuality = data.Videos.Items[0].Quality
+			selectedFPS = data.Videos.Items[0].FPS
+			Logger.Warn("EXTRACTOR", token, "Exact match for %dp not found, falling back to: %s (fps: %v)", targetHeight, selectedQuality, selectedFPS)
 		}
 
 		if targetVideoURL != "" {
 			audioURL := ""
 			if !hasAudio {
 				audioURL = bestAudioURL
+				Logger.Info("EXTRACTOR", token, "Video stream (%s) is DASH (no embedded audio). Separate audio stream attached for FFmpeg merge.", selectedQuality)
+			} else {
+				Logger.Info("EXTRACTOR", token, "Video stream (%s) contains embedded audio.", selectedQuality)
 			}
 			return &ExtractedMedia{
 				Type:     "video",
@@ -220,7 +252,9 @@ func ExtractFromRapidAPI(rawURL, quality string) (*ExtractedMedia, error) {
 	}
 
 	if lastErr != nil {
+		Logger.Error("EXTRACTOR", token, "All RapidAPI keys exhausted. Last error: %v", lastErr)
 		return nil, lastErr
 	}
+	Logger.Error("EXTRACTOR", token, "No suitable video stream found in RapidAPI response")
 	return nil, fmt.Errorf("no suitable video stream found")
 }

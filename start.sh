@@ -31,7 +31,6 @@ sleep 1
         sleep 300
         find /app/storage/downloads -type f -mmin +15 -delete 2>/dev/null || true
         find /app/storage/tgdata/temp -type f -mmin +15 -delete 2>/dev/null || true
-        find /dev/shm/downloads -type f -mmin +15 -delete 2>/dev/null || true
     done
 ) &
 
