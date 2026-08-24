@@ -70,50 +70,36 @@ func processTask(payload TaskPayload) {
 	}
 
 	// Step 1: 15% progress
-	UpdateProgress(payload, formatLabel, 15, "در حال استخراج لینک‌های دانلود")
+	UpdateProgress(payload, formatLabel, 15, "در حال استخراج لینک‌های دانلود از API")
 
-	var downloadedFile string
 	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, payload.AudioLang, token)
 	if err != nil {
 		if ctx.Err() != nil {
 			Logger.Info("TASK", token, "Task was cancelled during extraction")
 			return
 		}
-		Logger.Warn("TASK", token, "RapidAPI extraction failed (%v), falling back to direct yt-dlp download...", err)
-
-		targetFile := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
-		if payload.IsAudio || payload.Quality == "audio" {
-			targetFile = filepath.Join(downloadDir, fmt.Sprintf("%s.mp3", cleanToken))
-		}
-
-		yErr := DownloadDirectViaYtDlp(ctx, payload, targetFile, token)
-		if yErr == nil {
-			downloadedFile = targetFile
-			extracted = &ExtractedMedia{
-				Type:     "video",
-				Title:    "YouTube Video",
-				VideoURL: targetFile,
-			}
-			if payload.IsAudio || payload.Quality == "audio" {
-				extracted.Type = "audio"
-			}
-			err = nil
+		Logger.Error("TASK", token, "RapidAPI extraction FAILED: %v", err)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "429") {
+			errMsg = "❌ سهمیه کلید RapidAPI به پایان رسیده است (HTTP 429). لطفاً کلید جدید وارد فرمایید."
 		} else {
-			Logger.Error("TASK", token, "All extraction and yt-dlp fallbacks FAILED: %v", yErr)
-			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID,
-				"❌ <b>خطا در دریافت ویدیو از یوتیوب:</b>\n"+yErr.Error(), token)
-			if payload.MasterCallbackURL != "" {
-				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
-					"action":            "error",
-					"secret":            payload.Secret,
-					"chat_id":           FormatChatID(payload.ChatID),
-					"status_message_id": payload.StatusMessageID,
-					"error":             yErr.Error(),
-				}, token)
-			}
-			return
+			errMsg = "❌ خطا در استخراج لینک دانلود از API:\n" + errMsg
 		}
+		UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, errMsg, token)
+		if payload.MasterCallbackURL != "" {
+			SendMasterCallback(payload.MasterCallbackURL, map[string]any{
+				"action":            "error",
+				"secret":            payload.Secret,
+				"chat_id":           FormatChatID(payload.ChatID),
+				"status_message_id": payload.StatusMessageID,
+				"error":             err.Error(),
+			}, token)
+		}
+		return
 	}
+
+	// Step 2: 50% progress
+	UpdateProgress(payload, formatLabel, 50, "در حال دانلود پرسرعت استریم از سرور API")
 
 	defer func() {
 		cleanupFiles, _ := filepath.Glob(filepath.Join(downloadDir, cleanToken+"*"))
@@ -126,9 +112,7 @@ func processTask(payload TaskPayload) {
 		Logger.Debug("CLEANUP", token, "Cleaned up %d temporary files for token %s", removedCount, cleanToken)
 	}()
 
-	if downloadedFile == "" {
-		// Step 2: 50% progress
-		UpdateProgress(payload, formatLabel, 50, "در حال دانلود پرسرعت استریم")
+	var downloadedFile string
 
 	if extracted.Type == "audio" {
 		audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp3", cleanToken))
@@ -249,7 +233,6 @@ func processTask(payload TaskPayload) {
 			downloadedFile = videoPath
 		}
 	}
-}
 
 	// Step 3: 95% Uploading & Media Transformations
 	UpdateProgress(payload, formatLabel, 95, "در حال پردازش و آپلود نهایی در تلگرام")
@@ -542,48 +525,4 @@ func main() {
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		Logger.Critical("SERVER", "SYSTEM", "Fatal server listener error: %v", err)
 	}
-}
-
-func DownloadDirectViaYtDlp(ctx context.Context, payload TaskPayload, outputPath, token string) error {
-	UpdateProgress(payload, payload.Quality, 40, "در حال دانلود مستقیم از یوتیوب")
-	targetHeight := "1080"
-	if strings.Contains(payload.Quality, "2160") || strings.Contains(payload.Quality, "4k") {
-		targetHeight = "2160"
-	} else if strings.Contains(payload.Quality, "1440") || strings.Contains(payload.Quality, "2k") {
-		targetHeight = "1440"
-	} else if strings.Contains(payload.Quality, "1080") {
-		targetHeight = "1080"
-	} else if strings.Contains(payload.Quality, "720") {
-		targetHeight = "720"
-	} else if strings.Contains(payload.Quality, "480") {
-		targetHeight = "480"
-	} else if strings.Contains(payload.Quality, "360") {
-		targetHeight = "360"
-	}
-
-	var args []string
-	if payload.IsAudio || payload.Quality == "audio" {
-		formatSpec := "ba[language*=fa]/ba[language*=per]/ba[format_id*=fa]/ba[language_preference>0]/ba"
-		if payload.AudioLang == "en" {
-			formatSpec = "ba[language*=en]/ba[format_id*=en]/ba"
-		}
-		args = []string{"--no-warnings", "-f", formatSpec, "-x", "--audio-format", "mp3", "-o", outputPath, payload.VideoURL}
-	} else {
-		audioSpec := "ba[language*=fa]/ba[language*=per]/ba[format_id*=fa]/ba[language_preference>0]/ba"
-		if payload.AudioLang == "en" {
-			audioSpec = "ba[language*=en]/ba[format_id*=en]/ba"
-		}
-		formatSpec := fmt.Sprintf("bv*[height<=%s]+%s/b[height<=%s]/best", targetHeight, audioSpec, targetHeight)
-		args = []string{"--no-warnings", "-f", formatSpec, "--merge-output-format", "mp4", "-o", outputPath, payload.VideoURL}
-	}
-
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("yt-dlp error: %v, output: %s", err, string(out))
-	}
-	if fi, sErr := os.Stat(outputPath); sErr != nil || fi.Size() < 1000 {
-		return fmt.Errorf("downloaded file is empty")
-	}
-	return nil
 }
