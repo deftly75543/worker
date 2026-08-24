@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -230,6 +231,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 				buf := make([]byte, 128*1024)
 				currentOffset := startByte
+				var threadWrittenThisAttempt int64
 
 				for {
 					if ctx.Err() != nil {
@@ -244,6 +246,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 							break
 						}
 						currentOffset += int64(n)
+						threadWrittenThisAttempt += int64(n)
 						atomic.AddInt64(&totalWritten, int64(n))
 					}
 					if rErr != nil {
@@ -260,6 +263,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 				if chunkErr == nil {
 					return
 				}
+				atomic.AddInt64(&totalWritten, -threadWrittenThisAttempt)
 				Logger.Warn("DOWNLOADER", token, "Chunk #%d retry %d/3 due to: %v", threadID+1, retry+1, chunkErr)
 			}
 
@@ -401,6 +405,57 @@ func MergeVideoAudio(videoPath, audioPath, outputPath, token string) error {
 	return nil
 }
 
+type VideoMetadata struct {
+	Width    int
+	Height   int
+	Duration int
+}
+
+func GetVideoMetadata(videoPath, token string) VideoMetadata {
+	meta := VideoMetadata{Width: 1280, Height: 720, Duration: 0}
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=width,height,duration:format=duration",
+		"-of", "json", videoPath)
+	out, err := cmd.Output()
+	if err != nil {
+		Logger.Warn("METADATA", token, "ffprobe failed (using 1280x720 defaults): %v", err)
+		return meta
+	}
+
+	var data struct {
+		Streams []struct {
+			Width    int    `json:"width"`
+			Height   int    `json:"height"`
+			Duration string `json:"duration"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+
+	if err := json.Unmarshal(out, &data); err == nil {
+		if len(data.Streams) > 0 {
+			if data.Streams[0].Width > 0 {
+				meta.Width = data.Streams[0].Width
+			}
+			if data.Streams[0].Height > 0 {
+				meta.Height = data.Streams[0].Height
+			}
+			if durF, err := strconv.ParseFloat(data.Streams[0].Duration, 64); err == nil && durF > 0 {
+				meta.Duration = int(durF)
+			}
+		}
+		if meta.Duration == 0 && data.Format.Duration != "" {
+			if durF, err := strconv.ParseFloat(data.Format.Duration, 64); err == nil && durF > 0 {
+				meta.Duration = int(durF)
+			}
+		}
+	}
+
+	Logger.Info("METADATA", token, "Detected video dimensions: %dx%d, Duration: %ds", meta.Width, meta.Height, meta.Duration)
+	return meta
+}
+
 func GenerateThumbnail(videoPath, thumbPath, token string) error {
 	startTime := time.Now()
 	cmd := exec.Command("ffmpeg", "-y", "-ss", "00:00:01", "-i", videoPath, "-vframes", "1", "-q:v", "2", "-vf", "scale='min(640,iw)':-2", thumbPath)
@@ -410,5 +465,93 @@ func GenerateThumbnail(videoPath, thumbPath, token string) error {
 		return err
 	}
 	Logger.Debug("THUMBNAIL", token, "Generated thumbnail in %v -> %s", time.Since(startTime), thumbPath)
+	return nil
+}
+
+func TrimMedia(src, dst, startTime, duration, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Trimming media: Start=%s, Duration=%s -> %s", startTime, duration, dst)
+	cmd := exec.Command("ffmpeg", "-y", "-ss", startTime, "-i", src, "-t", duration, "-c", "copy", "-movflags", "+faststart", dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// در صورت عدم امکان copy، مجدداً انکود سریع انجام می‌دهیم
+		cmd = exec.Command("ffmpeg", "-y", "-ss", startTime, "-i", src, "-t", duration, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", dst)
+		out, err = cmd.CombinedOutput()
+	}
+	if err != nil {
+		Logger.Error("FFMPEG", token, "Trim media failed in %v: %v. Output: %s", time.Since(t0), err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "Trim media completed successfully in %v", time.Since(t0))
+	return nil
+}
+
+func GeneratePreviewGIF(src, dst, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Generating 4s Preview MP4 Teaser -> %s", dst)
+	cmd := exec.Command("ffmpeg", "-y", "-ss", "00:00:04", "-t", "4", "-i", src, "-vf", "fps=12,scale=480:-2:flags=lanczos", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Warn("FFMPEG", token, "Preview teaser generation failed in %v: %v. Output: %s", time.Since(t0), err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "Preview teaser generated in %v", time.Since(t0))
+	return nil
+}
+
+func EmbedID3Tags(srcMP3, dstMP3, title, artist, thumbPath, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Embedding ID3 tags & Album art: Title='%s', Artist='%s'", title, artist)
+	var cmd *exec.Cmd
+	if thumbPath != "" {
+		cmd = exec.Command("ffmpeg", "-y", "-i", srcMP3, "-i", thumbPath, "-map", "0:a", "-map", "1:0", "-c:a", "copy", "-c:v", "copy", "-id3v2_version", "3", "-metadata", "title="+title, "-metadata", "artist="+artist, dstMP3)
+	} else {
+		cmd = exec.Command("ffmpeg", "-y", "-i", srcMP3, "-c:a", "copy", "-id3v2_version", "3", "-metadata", "title="+title, "-metadata", "artist="+artist, dstMP3)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Warn("FFMPEG", token, "ID3 tag embedding failed: %v. Fallback raw file. Output: %s", err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "ID3 tags embedded successfully in %v", time.Since(t0))
+	return nil
+}
+
+func ConvertToVoiceOGG(src, dstOGG, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Converting audio to Telegram Voice (OGG OPUS) -> %s", dstOGG)
+	cmd := exec.Command("ffmpeg", "-y", "-i", src, "-c:a", "libopus", "-b:a", "48k", "-vbr", "on", "-compression_level", "10", dstOGG)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Error("FFMPEG", token, "Voice conversion failed in %v: %v. Output: %s", time.Since(t0), err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "Voice converted successfully in %v", time.Since(t0))
+	return nil
+}
+
+func MakeRingtone(src, dstMP3, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Extracting 30s Ringtone -> %s", dstMP3)
+	cmd := exec.Command("ffmpeg", "-y", "-ss", "00:00:20", "-t", "30", "-i", src, "-af", "afade=t=in:ss=0:d=1.5,afade=t=out:st=28.5:d=1.5", "-c:a", "libmp3lame", "-b:a", "192k", dstMP3)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Error("FFMPEG", token, "Ringtone extraction failed: %v. Output: %s", err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "Ringtone created in %v", time.Since(t0))
+	return nil
+}
+
+func CompressVideo(src, dst, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Data Saver Compression active -> %s", dst)
+	cmd := exec.Command("ffmpeg", "-y", "-i", src, "-vf", "scale='min(640,iw)':-2", "-c:v", "libx264", "-crf", "28", "-preset", "veryfast", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Error("FFMPEG", token, "Data saver compression failed: %v. Output: %s", err, string(out))
+		return err
+	}
+	Logger.Info("FFMPEG", token, "Data saver compressed video in %v", time.Since(t0))
 	return nil
 }

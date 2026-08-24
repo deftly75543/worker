@@ -21,7 +21,14 @@ type TaskPayload struct {
 	VideoURL          string `json:"video_url"`
 	VideoID           string `json:"video_id"`
 	Quality           string `json:"quality"`
+	AudioLang         string `json:"audio_lang"`
 	IsAudio           bool   `json:"is_audio"`
+	SendFormat        string `json:"send_format"`   // "video", "document", "voice", "ringtone", "gif"
+	TrimStart         string `json:"trim_start"`    // e.g. "00:01:20"
+	TrimDuration      string `json:"trim_duration"` // e.g. "45"
+	DataSaver         bool   `json:"data_saver"`
+	ProgressTheme     string `json:"progress_theme"` // "modern", "rocket", "heart", "classic"
+	PrefLang          string `json:"pref_lang"`      // "fa", "en"
 	ChatID            any    `json:"chat_id"`
 	StatusMessageID   int    `json:"status_message_id"`
 	BotToken          string `json:"bot_token"`
@@ -33,6 +40,35 @@ var (
 	lastMsgEditMu sync.Mutex
 	lastMsgEdit   = make(map[string]time.Time)
 )
+
+func renderThemeProgressBar(percent int, theme string) string {
+	filled := percent / 10
+	if filled > 10 {
+		filled = 10
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	empty := 10 - filled
+
+	switch strings.ToLower(theme) {
+	case "rocket":
+		// استایل موشکی
+		if filled == 10 {
+			return strings.Repeat("━", 9) + "🚀"
+		}
+		return strings.Repeat("━", filled) + "🚀" + strings.Repeat("─", empty)
+	case "heart":
+		// استایل قلبی
+		return strings.Repeat("❤️", filled) + strings.Repeat("🤍", empty)
+	case "classic":
+		// استایل کلاسیک
+		return strings.Repeat("■", filled) + strings.Repeat("□", empty)
+	default:
+		// استایل مدرن
+		return strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	}
+}
 
 func FormatChatID(chatID any) string {
 	if chatID == nil {
@@ -94,11 +130,7 @@ func UpdateTelegramMessage(botToken string, chatID any, messageID int, text, tok
 }
 
 func UpdateProgress(payload TaskPayload, formatLabel string, percent int, statusText string) {
-	filled := percent / 10
-	if filled > 10 {
-		filled = 10
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
+	bar := renderThemeProgressBar(percent, payload.ProgressTheme)
 
 	msg := fmt.Sprintf("⚡ <b>%s (%s)</b>\n\n📊 <code>[%s] %d%%</code>\n🚀 <i>لطفاً کمی شکیبا باشید...</i>",
 		statusText, formatLabel, bar, percent)
@@ -132,11 +164,7 @@ func UpdateLiveDownloadProgress(payload TaskPayload, formatLabel string, stagePe
 	lastMsgEdit[token] = time.Now()
 	lastMsgEditMu.Unlock()
 
-	filled := stagePercent / 10
-	if filled > 10 {
-		filled = 10
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
+	bar := renderThemeProgressBar(stagePercent, payload.ProgressTheme)
 
 	var sizeDetails string
 	if totalBytes > 0 {
@@ -212,8 +240,24 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	safeTitle := escapeHTML(title)
 	safeFormat := escapeHTML(formatLabel)
 
-	caption := fmt.Sprintf("✅ <b>دانلود با موفقیت انجام شد</b>\n\n🎬 عنوان: <b>%s</b>\n📁 کیفیت: <code>%s</code>\n📦 حجم فایل: <code>%.2f MB</code>\n\n⚡ <i>ارسال شده توسط ربات دانلود از یوتیوب</i>",
+	caption := fmt.Sprintf("✅ <b>دانلود با موفقیت انجام شد</b>\n\n🎬 <b>عنوان:</b> %s\n📁 <b>کیفیت:</b> <code>%s</code>\n📦 <b>حجم فایل:</b> <code>%.2f MB</code>\n\n🌐 <b>لینک دانلود مستقیم:</b> @Filet0l1nkbot\n🤖 <b>ربات دانلودر:</b> @YouTubeDL_FastBot\n⚡ <i>ارسال شده توسط ربات دانلود از یوتیوب</i>",
 		safeTitle, safeFormat, sizeMB)
+
+	replyMarkupJson := fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 دریافت لینک مستقیم دانلود","url":"https://t.me/Filet0l1nkbot"}],[{"text":"👍 عالی بود","callback_data":"react:1:%s"},{"text":"👎 ضعیف بود","callback_data":"react:0:%s"}]]}`,
+		payload.VideoID, payload.VideoID)
+
+	if payload.PrefLang == "en" {
+		caption = fmt.Sprintf("✅ <b>Download Completed Successfully</b>\n\n🎬 <b>Title:</b> %s\n📁 <b>Quality:</b> <code>%s</code>\n📦 <b>File Size:</b> <code>%.2f MB</code>\n\n🌐 <b>Direct Download Link:</b> @Filet0l1nkbot\n🤖 <b>Downloader Bot:</b> @YouTubeDL_FastBot\n⚡ <i>Delivered by YouTube Downloader Bot</i>",
+			safeTitle, safeFormat, sizeMB)
+		replyMarkupJson = fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 Get Direct Download Link","url":"https://t.me/Filet0l1nkbot"}],[{"text":"👍 Loved it","callback_data":"react:1:%s"},{"text":"👎 Needs work","callback_data":"react:0:%s"}]]}`,
+			payload.VideoID, payload.VideoID)
+	}
+
+	// دریافت ابعاد دقیق ویدیویی و مدت زمان برای رندر ۱۶:۹ در تلگرام (بدون کادر مربعی)
+	var meta VideoMetadata
+	if !isAudio {
+		meta = GetVideoMetadata(filePath, token)
+	}
 
 	// بررسی سرور محلی تلگرام (پورت 8081 برای آپلودهای تا ۲ گیگابایت)
 	apiBase := "http://127.0.0.1:8081"
@@ -231,14 +275,23 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 
 	method := "sendVideo"
 	field := "video"
-	if isAudio {
+	if payload.SendFormat == "document" {
+		method = "sendDocument"
+		field = "document"
+	} else if payload.SendFormat == "voice" {
+		method = "sendVoice"
+		field = "voice"
+	} else if payload.SendFormat == "gif" {
+		method = "sendAnimation"
+		field = "animation"
+	} else if isAudio || payload.SendFormat == "ringtone" || payload.SendFormat == "ring" {
 		method = "sendAudio"
 		field = "audio"
 	}
 
 	urlEndpoint := fmt.Sprintf("%s/bot%s/%s", apiBase, payload.BotToken, method)
-	Logger.Info("UPLOADER", token, "Initiating upload -> %s (Size: %.2f MB, Method: %s, TargetChat: %s, Local: %v)",
-		urlEndpoint, sizeMB, method, targetChatID, isLocal)
+	Logger.Info("UPLOADER", token, "Initiating upload -> %s (Size: %.2f MB, Dimensions: %dx%d, Method: %s, TargetChat: %s, Local: %v)",
+		urlEndpoint, sizeMB, meta.Width, meta.Height, method, targetChatID, isLocal)
 
 	var req *http.Request
 
@@ -248,6 +301,7 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		form.Set("chat_id", targetChatID)
 		form.Set("caption", caption)
 		form.Set("parse_mode", "HTML")
+		form.Set("reply_markup", replyMarkupJson)
 		form.Set(field, "file://"+filePath)
 		if thumbPath != "" {
 			form.Set("thumbnail", "file://"+thumbPath)
@@ -257,6 +311,11 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 			form.Set("performer", "YouTube Audio")
 		} else {
 			form.Set("supports_streaming", "true")
+			form.Set("width", strconv.Itoa(meta.Width))
+			form.Set("height", strconv.Itoa(meta.Height))
+			if meta.Duration > 0 {
+				form.Set("duration", strconv.Itoa(meta.Duration))
+			}
 		}
 
 		req, err = http.NewRequest("POST", urlEndpoint, strings.NewReader(form.Encode()))
@@ -275,11 +334,17 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 			_ = mpWriter.WriteField("chat_id", targetChatID)
 			_ = mpWriter.WriteField("caption", caption)
 			_ = mpWriter.WriteField("parse_mode", "HTML")
+			_ = mpWriter.WriteField("reply_markup", replyMarkupJson)
 			if isAudio {
 				_ = mpWriter.WriteField("title", title)
 				_ = mpWriter.WriteField("performer", "YouTube Audio")
 			} else {
 				_ = mpWriter.WriteField("supports_streaming", "true")
+				_ = mpWriter.WriteField("width", strconv.Itoa(meta.Width))
+				_ = mpWriter.WriteField("height", strconv.Itoa(meta.Height))
+				if meta.Duration > 0 {
+					_ = mpWriter.WriteField("duration", strconv.Itoa(meta.Duration))
+				}
 			}
 
 			// Thumbnail
@@ -334,6 +399,12 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 			Document struct {
 				FileID string `json:"file_id"`
 			} `json:"document"`
+			Voice struct {
+				FileID string `json:"file_id"`
+			} `json:"voice"`
+			Animation struct {
+				FileID string `json:"file_id"`
+			} `json:"animation"`
 		} `json:"result"`
 	}
 	_ = json.Unmarshal(respRaw, &resData)
@@ -345,6 +416,12 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		}
 		if fileID == "" {
 			fileID = resData.Result.Document.FileID
+		}
+		if fileID == "" {
+			fileID = resData.Result.Voice.FileID
+		}
+		if fileID == "" {
+			fileID = resData.Result.Animation.FileID
 		}
 
 		speedMBs := sizeMB / uploadElapsed.Seconds()

@@ -71,7 +71,7 @@ func processTask(payload TaskPayload) {
 	// Step 1: 15% progress
 	UpdateProgress(payload, formatLabel, 15, "در حال استخراج لینک‌های دانلود")
 
-	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, token)
+	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, payload.AudioLang, token)
 	if err != nil {
 		if ctx.Err() != nil {
 			Logger.Info("TASK", token, "Task was cancelled during extraction")
@@ -84,7 +84,7 @@ func processTask(payload TaskPayload) {
 			SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 				"action":            "error",
 				"secret":            payload.Secret,
-				"chat_id":           payload.ChatID,
+				"chat_id":           FormatChatID(payload.ChatID),
 				"status_message_id": payload.StatusMessageID,
 				"error":             err.Error(),
 			}, token)
@@ -190,15 +190,62 @@ func processTask(payload TaskPayload) {
 		}
 	}
 
-	// Step 3: 95% Uploading
-	UpdateProgress(payload, formatLabel, 95, "در حال آپلود و ارسال در تلگرام")
+	// Step 3: 95% Uploading & Media Transformations
+	UpdateProgress(payload, formatLabel, 95, "در حال پردازش و آپلود نهایی در تلگرام")
 
 	var thumbPath string
-	if extracted.Type == "video" {
-		tPath := filepath.Join(downloadDir, fmt.Sprintf("%s_thumb.jpg", cleanToken))
-		if err := GenerateThumbnail(downloadedFile, tPath, token); err == nil {
-			thumbPath = tPath
-			defer os.Remove(tPath)
+	tPath := filepath.Join(downloadDir, fmt.Sprintf("%s_thumb.jpg", cleanToken))
+	if err := GenerateThumbnail(downloadedFile, tPath, token); err == nil {
+		thumbPath = tPath
+		defer os.Remove(tPath)
+	}
+
+	// ۱. برش بازه زمانی (Trim & Cut)
+	if payload.TrimStart != "" && payload.TrimDuration != "" {
+		ext := filepath.Ext(downloadedFile)
+		trimmedPath := filepath.Join(downloadDir, fmt.Sprintf("%s_trimmed%s", cleanToken, ext))
+		if err := TrimMedia(downloadedFile, trimmedPath, payload.TrimStart, payload.TrimDuration, token); err == nil {
+			downloadedFile = trimmedPath
+		}
+	}
+
+	// ۲. تیزر متحرک (Preview GIF / Animation)
+	if payload.SendFormat == "gif" {
+		gifPath := filepath.Join(downloadDir, fmt.Sprintf("%s_preview.mp4", cleanToken))
+		if err := GeneratePreviewGIF(downloadedFile, gifPath, token); err == nil {
+			downloadedFile = gifPath
+		}
+	}
+
+	// ۳. فشرده‌سازی کاهش مصرف داده (Data Saver)
+	if payload.DataSaver && extracted.Type == "video" && payload.SendFormat != "gif" {
+		compPath := filepath.Join(downloadDir, fmt.Sprintf("%s_compressed.mp4", cleanToken))
+		if err := CompressVideo(downloadedFile, compPath, token); err == nil {
+			downloadedFile = compPath
+		}
+	}
+
+	// ۴. تبدیل به ویس مسیج (Telegram Voice OGG)
+	if payload.SendFormat == "voice" {
+		voicePath := filepath.Join(downloadDir, fmt.Sprintf("%s.ogg", cleanToken))
+		if err := ConvertToVoiceOGG(downloadedFile, voicePath, token); err == nil {
+			downloadedFile = voicePath
+		}
+	}
+
+	// ۵. ساخت رینگتون ۳۰ ثانیه‌ای (Ringtone Maker)
+	if payload.SendFormat == "ringtone" || payload.SendFormat == "ring" {
+		ringPath := filepath.Join(downloadDir, fmt.Sprintf("%s_ring.mp3", cleanToken))
+		if err := MakeRingtone(downloadedFile, ringPath, token); err == nil {
+			downloadedFile = ringPath
+		}
+	}
+
+	// ۶. متادیتا و کاور آرت برای فایل MP3
+	if extracted.Type == "audio" && payload.SendFormat != "voice" && payload.SendFormat != "ringtone" && payload.SendFormat != "ring" {
+		taggedPath := filepath.Join(downloadDir, fmt.Sprintf("%s_tagged.mp3", cleanToken))
+		if err := EmbedID3Tags(downloadedFile, taggedPath, extracted.Title, "YouTube Music", thumbPath, token); err == nil {
+			downloadedFile = taggedPath
 		}
 	}
 
@@ -238,6 +285,7 @@ func processTask(payload TaskPayload) {
 			"status_message_id": payload.StatusMessageID,
 			"video_id":          payload.VideoID,
 			"quality":           payload.Quality,
+			"audio_lang":        payload.AudioLang,
 			"is_audio":          payload.IsAudio,
 			"telegram_file_id":  fileID,
 		}, token)
@@ -357,6 +405,14 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseForm()
 			payload.VideoURL = r.FormValue("video_url")
 			payload.Quality = r.FormValue("quality")
+			payload.AudioLang = r.FormValue("audio_lang")
+			payload.SendFormat = r.FormValue("send_format")
+			payload.TrimStart = r.FormValue("trim_start")
+			payload.TrimDuration = r.FormValue("trim_duration")
+			payload.ProgressTheme = r.FormValue("progress_theme")
+			if r.FormValue("data_saver") == "1" || r.FormValue("data_saver") == "true" {
+				payload.DataSaver = true
+			}
 		}
 	}
 

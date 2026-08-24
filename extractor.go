@@ -13,11 +13,12 @@ import (
 )
 
 type ExtractedMedia struct {
-	Type     string // "video" or "audio"
-	Title    string
-	VideoURL string
-	AudioURL string
-	HasAudio bool
+	Type          string // "video" or "audio"
+	Title         string
+	VideoURL      string
+	AudioURL      string
+	AudioLangName string
+	HasAudio      bool
 }
 
 type RapidAPIVideoItem struct {
@@ -28,8 +29,18 @@ type RapidAPIVideoItem struct {
 }
 
 type RapidAPIAudioItem struct {
-	Quality string `json:"quality"`
-	URL     string `json:"url"`
+	Quality      string `json:"quality"`
+	URL          string `json:"url"`
+	Language     string `json:"language"`
+	LanguageCode string `json:"languageCode"`
+	DisplayName  string `json:"displayName"`
+	IsOriginal   bool   `json:"isOriginal"`
+	IsDefault    bool   `json:"isDefault"`
+	AudioTrack   struct {
+		ID             string `json:"id"`
+		DisplayName    string `json:"displayName"`
+		AudioIsDefault bool   `json:"audioIsDefault"`
+	} `json:"audioTrack"`
 }
 
 type RapidAPIDetailsResponse struct {
@@ -64,7 +75,6 @@ func parseFPS(val any) int {
 	}
 }
 
-
 func getRapidAPIKeys() []string {
 	defaultKey := "ec2be8b14cmsh4a5fe1b3d472a19p13be78jsn655c7e8e540d"
 	envKeys := os.Getenv("RAPIDAPI_KEYS")
@@ -94,15 +104,123 @@ func extractVideoID(rawURL string) string {
 	return ""
 }
 
+func getAudioLang(item RapidAPIAudioItem) (code string, name string, isOrig bool) {
+	name = item.DisplayName
+	if name == "" {
+		name = item.AudioTrack.DisplayName
+	}
+	if name == "" {
+		name = item.Language
+	}
 
-func ExtractFromRapidAPI(rawURL, quality, token string) (*ExtractedMedia, error) {
+	code = strings.ToLower(item.LanguageCode)
+	if code == "" {
+		code = strings.ToLower(item.Language)
+	}
+
+	nameLower := strings.ToLower(name)
+	if item.IsOriginal || strings.Contains(nameLower, "original") || strings.Contains(nameLower, "اصلی") {
+		isOrig = true
+	}
+
+	if code == "" {
+		if strings.Contains(nameLower, "persian") || strings.Contains(nameLower, "farsi") || strings.Contains(nameLower, "فارسی") || strings.Contains(nameLower, "fa") {
+			code = "fa"
+			if name == "" {
+				name = "فارسی (زبان اصلی)"
+			}
+		} else if strings.Contains(nameLower, "english") || strings.Contains(nameLower, "en") {
+			code = "en"
+			if name == "" {
+				name = "English"
+			}
+		} else if strings.Contains(nameLower, "spanish") || strings.Contains(nameLower, "es") {
+			code = "es"
+		} else if strings.Contains(nameLower, "arabic") || strings.Contains(nameLower, "ar") {
+			code = "ar"
+		}
+	}
+
+	if code == "" && item.URL != "" {
+		if strings.Contains(item.URL, "lang=fa") || strings.Contains(item.URL, "lang=fas") || strings.Contains(item.URL, "lang=per") {
+			code = "fa"
+			name = "فارسی"
+		} else if strings.Contains(item.URL, "lang=en") {
+			code = "en"
+			name = "English"
+		}
+	}
+
+	if name == "" {
+		name = item.Quality
+	}
+	return code, name, isOrig
+}
+
+func selectBestAudioStream(audios []RapidAPIAudioItem, targetLang, token string) (string, string) {
+	if len(audios) == 0 {
+		return "", ""
+	}
+
+	targetLang = strings.ToLower(strings.TrimSpace(targetLang))
+
+	// ۱. اگر کاربر صریحاً زبانی را انتخاب کرده بود (مثلاً fa یا en یا orig)
+	if targetLang != "" && targetLang != "default" {
+		// انتخاب بر اساس کد زبان (fa, en, es, ...)
+		for _, item := range audios {
+			code, name, isOrig := getAudioLang(item)
+			if targetLang == "orig" && (isOrig || item.IsOriginal || strings.Contains(strings.ToLower(name), "original") || strings.Contains(name, "اصلی")) {
+				Logger.Info("EXTRACTOR", token, "Matched explicitly requested Original Audio Track: %s (%s)", name, item.Quality)
+				return item.URL, name
+			}
+			if code == targetLang || strings.EqualFold(code, targetLang) || strings.Contains(strings.ToLower(name), targetLang) {
+				Logger.Info("EXTRACTOR", token, "Matched explicitly requested audio language [%s]: %s (%s)", targetLang, name, item.Quality)
+				return item.URL, name
+			}
+		}
+	}
+
+	// ۲. اگر زبانی مشخص نشده بود، استراتژی پیش‌فرض هوشمند (Smart Default):
+	// اولویت اول: زبان فارسی (Persian / Farsi)
+	for _, item := range audios {
+		code, name, _ := getAudioLang(item)
+		if code == "fa" || strings.Contains(strings.ToLower(name), "persian") || strings.Contains(strings.ToLower(name), "farsi") || strings.Contains(name, "فارسی") {
+			Logger.Info("EXTRACTOR", token, "Smart Priority Auto-Selected Persian Audio: %s (%s)", name, item.Quality)
+			return item.URL, name
+		}
+	}
+
+	// اولویت دوم: زبان اصلی ویدیو (Original Track)
+	for _, item := range audios {
+		_, name, isOrig := getAudioLang(item)
+		if isOrig || item.IsOriginal || item.AudioTrack.AudioIsDefault || strings.Contains(strings.ToLower(name), "original") || strings.Contains(name, "اصلی") {
+			Logger.Info("EXTRACTOR", token, "Smart Priority Auto-Selected Original Audio Track: %s (%s)", name, item.Quality)
+			return item.URL, name
+		}
+	}
+
+	// اولویت سوم: ترک پیش‌فرض یا اولین ترک با بالاترین کیفیت
+	for _, item := range audios {
+		if item.IsDefault || item.AudioTrack.AudioIsDefault {
+			_, name, _ := getAudioLang(item)
+			Logger.Info("EXTRACTOR", token, "Auto-Selected Default Audio Track: %s (%s)", name, item.Quality)
+			return item.URL, name
+		}
+	}
+
+	_, name, _ := getAudioLang(audios[0])
+	Logger.Info("EXTRACTOR", token, "Auto-Selected Standard Audio Track: %s (%s)", name, audios[0].Quality)
+	return audios[0].URL, name
+}
+
+func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMedia, error) {
 	videoID := extractVideoID(rawURL)
 	if videoID == "" {
 		Logger.Error("EXTRACTOR", token, "Invalid YouTube URL provided: %s", rawURL)
 		return nil, fmt.Errorf("invalid youtube url: %s", rawURL)
 	}
 
-	Logger.Info("EXTRACTOR", token, "Starting extraction for VideoID: %s, Requested Quality: %s", videoID, quality)
+	Logger.Info("EXTRACTOR", token, "Starting extraction for VideoID: %s, Requested Quality: %s, AudioLang: %s", videoID, quality, audioLang)
 
 	keys := getRapidAPIKeys()
 	client := &http.Client{Timeout: 25 * time.Second}
@@ -157,21 +275,18 @@ func ExtractFromRapidAPI(rawURL, quality, token string) (*ExtractedMedia, error)
 		Logger.Info("EXTRACTOR", token, "Extracted Title: '%s', Channel: '%s', Duration: %v sec, Videos: %d, Audios: %d",
 			title, data.ChannelTitle, data.LengthSeconds, len(data.Videos.Items), len(data.Audios.Items))
 
-		// Best audio stream
-		var bestAudioURL string
-		if len(data.Audios.Items) > 0 {
-			bestAudioURL = data.Audios.Items[0].URL
-			Logger.Debug("EXTRACTOR", token, "Found best audio stream quality: %s", data.Audios.Items[0].Quality)
-		}
+		// انتخاب هوشمند ترک صوتی بر اساس درخواست کاربر یا اولویت فارسی/اصلی
+		bestAudioURL, selectedLangName := selectBestAudioStream(data.Audios.Items, audioLang, token)
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if bestAudioURL != "" {
-				Logger.Info("EXTRACTOR", token, "Audio-only requested. Successfully matched audio stream.")
+				Logger.Info("EXTRACTOR", token, "Audio-only requested (%s). Successfully matched audio stream.", selectedLangName)
 				return &ExtractedMedia{
-					Type:     "audio",
-					Title:    title,
-					AudioURL: bestAudioURL,
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      bestAudioURL,
+					AudioLangName: selectedLangName,
 				}, nil
 			}
 			Logger.Warn("EXTRACTOR", token, "Audio requested but no audio stream found in RapidAPI response")
@@ -235,18 +350,20 @@ func ExtractFromRapidAPI(rawURL, quality, token string) (*ExtractedMedia, error)
 
 		if targetVideoURL != "" {
 			audioURL := ""
-			if !hasAudio {
+			// اگر ویدیو DASH است یا اگر کاربر صوت متفاوتی را نسبت به صوت پیش‌فرض توکار ویدیو درخواست کرده
+			if !hasAudio || (audioLang != "" && audioLang != "default") {
 				audioURL = bestAudioURL
-				Logger.Info("EXTRACTOR", token, "Video stream (%s) is DASH (no embedded audio). Separate audio stream attached for FFmpeg merge.", selectedQuality)
+				Logger.Info("EXTRACTOR", token, "Video stream (%s) attached with audio track [%s] for FFmpeg merge.", selectedQuality, selectedLangName)
 			} else {
 				Logger.Info("EXTRACTOR", token, "Video stream (%s) contains embedded audio.", selectedQuality)
 			}
 			return &ExtractedMedia{
-				Type:     "video",
-				Title:    title,
-				VideoURL: targetVideoURL,
-				AudioURL: audioURL,
-				HasAudio: hasAudio,
+				Type:          "video",
+				Title:         title,
+				VideoURL:      targetVideoURL,
+				AudioURL:      audioURL,
+				AudioLangName: selectedLangName,
+				HasAudio:      hasAudio && audioURL == "",
 			}, nil
 		}
 	}
