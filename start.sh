@@ -36,6 +36,9 @@ sleep 1
 
 # ۳. اجرای باینری نیتیو ورکر Go
 LISTEN_PORT="${PORT:-8080}"
-echo "🌐 Starting Ultra-Fast Go Worker on port ${LISTEN_PORT}..."
+export GOMEMLIMIT="${GOMEMLIMIT:-380MiB}"
+export GOGC="${GOGC:-40}"
+
+echo "🌐 Starting Ultra-Fast Go Worker on port ${LISTEN_PORT} (GOMEMLIMIT=${GOMEMLIMIT})..."
 exec /app/worker
 

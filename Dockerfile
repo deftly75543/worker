@@ -47,6 +47,9 @@ RUN mkdir -p /app/storage/downloads /app/storage/tgdata /app/storage/tgdata/temp
     && chmod +x /app/start.sh /app/worker
 
 ENV PORT=8080
+ENV GOMEMLIMIT=380MiB
+ENV GOGC=40
+
 EXPOSE 8080 8081
 
 ENTRYPOINT ["/app/start.sh"]

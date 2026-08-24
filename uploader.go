@@ -237,55 +237,76 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	}
 
 	urlEndpoint := fmt.Sprintf("%s/bot%s/%s", apiBase, payload.BotToken, method)
-	Logger.Info("UPLOADER", token, "Initiating multipart upload -> %s (Size: %.2f MB, Method: %s, TargetChat: %s, Local: %v)",
+	Logger.Info("UPLOADER", token, "Initiating upload -> %s (Size: %.2f MB, Method: %s, TargetChat: %s, Local: %v)",
 		urlEndpoint, sizeMB, method, targetChatID, isLocal)
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
+	var req *http.Request
 
-	_ = writer.WriteField("chat_id", targetChatID)
-	_ = writer.WriteField("caption", caption)
-	_ = writer.WriteField("parse_mode", "HTML")
-	if isAudio {
-		_ = writer.WriteField("title", title)
-		_ = writer.WriteField("performer", "YouTube Audio")
-	} else {
-		_ = writer.WriteField("supports_streaming", "true")
-	}
-
-	// File stream
-	part, err := writer.CreateFormFile(field, filepath.Base(filePath))
-	if err != nil {
-		Logger.Error("UPLOADER", token, "Failed to create form file field '%s': %v", field, err)
-		return "", err
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		Logger.Error("UPLOADER", token, "Failed to copy file data to multipart buffer: %v", err)
-		return "", err
-	}
-
-	// Thumbnail
-	if thumbPath != "" {
-		if thumbFile, err := os.Open(thumbPath); err == nil {
-			if thumbPart, err := writer.CreateFormFile("thumbnail", filepath.Base(thumbPath)); err == nil {
-				_, _ = io.Copy(thumbPart, thumbFile)
-				Logger.Debug("UPLOADER", token, "Attached thumbnail to video upload: %s", thumbPath)
-			}
-			thumbFile.Close()
+	// بهینه‌سازی ۱: اگر سرور محلی تلگرام فعال است، از ارجاع مستقیم فایلی (file://) استفاده می‌کنیم (مصرف رم صفر)
+	if isLocal {
+		form := url.Values{}
+		form.Set("chat_id", targetChatID)
+		form.Set("caption", caption)
+		form.Set("parse_mode", "HTML")
+		form.Set(field, "file://"+filePath)
+		if thumbPath != "" {
+			form.Set("thumbnail", "file://"+thumbPath)
 		}
-	}
+		if isAudio {
+			form.Set("title", title)
+			form.Set("performer", "YouTube Audio")
+		} else {
+			form.Set("supports_streaming", "true")
+		}
 
-	if err := writer.Close(); err != nil {
-		Logger.Error("UPLOADER", token, "Failed to finalize multipart writer: %v", err)
-		return "", err
-	}
+		req, err = http.NewRequest("POST", urlEndpoint, strings.NewReader(form.Encode()))
+		if err != nil {
+			Logger.Error("UPLOADER", token, "Failed to create local POST request: %v", err)
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	} else {
+		// بهینه‌سازی ۲: برای API ابری از استریمینگ واقعی با io.Pipe استفاده می‌کنیم تا بدون مصرف رم اضافی (فقط بافر 64KB) آپلود انجام شود
+		pipeReader, pipeWriter := io.Pipe()
+		mpWriter := multipart.NewWriter(pipeWriter)
 
-	req, err := http.NewRequest("POST", urlEndpoint, body)
-	if err != nil {
-		Logger.Error("UPLOADER", token, "Failed to create POST request: %v", err)
-		return "", err
+		go func() {
+			defer pipeWriter.Close()
+			_ = mpWriter.WriteField("chat_id", targetChatID)
+			_ = mpWriter.WriteField("caption", caption)
+			_ = mpWriter.WriteField("parse_mode", "HTML")
+			if isAudio {
+				_ = mpWriter.WriteField("title", title)
+				_ = mpWriter.WriteField("performer", "YouTube Audio")
+			} else {
+				_ = mpWriter.WriteField("supports_streaming", "true")
+			}
+
+			// Thumbnail
+			if thumbPath != "" {
+				if thumbFile, tErr := os.Open(thumbPath); tErr == nil {
+					if thumbPart, pErr := mpWriter.CreateFormFile("thumbnail", filepath.Base(thumbPath)); pErr == nil {
+						_, _ = io.Copy(thumbPart, thumbFile)
+					}
+					thumbFile.Close()
+				}
+			}
+
+			// File stream
+			if part, pErr := mpWriter.CreateFormFile(field, filepath.Base(filePath)); pErr == nil {
+				buf := make([]byte, 64*1024)
+				_, _ = io.CopyBuffer(part, file, buf)
+			}
+			_ = mpWriter.Close()
+		}()
+
+		req, err = http.NewRequest("POST", urlEndpoint, pipeReader)
+		if err != nil {
+			Logger.Error("UPLOADER", token, "Failed to create POST request: %v", err)
+			return "", err
+		}
+		req.Header.Set("Content-Type", mpWriter.FormDataContentType())
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	uploadClient := &http.Client{Timeout: 35 * time.Minute}
 	upResp, err := uploadClient.Do(req)
