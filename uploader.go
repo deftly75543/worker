@@ -243,14 +243,14 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 	caption := fmt.Sprintf("✅ <b>دانلود با موفقیت انجام شد</b>\n\n🎬 <b>عنوان:</b> %s\n📁 <b>کیفیت:</b> <code>%s</code>\n📦 <b>حجم فایل:</b> <code>%.2f MB</code>\n\n🌐 <b>لینک دانلود مستقیم:</b> @Filet0l1nkbot\n🤖 <b>ربات دانلودر:</b> @YouTubeDL_FastBot\n⚡ <i>ارسال شده توسط ربات دانلود از یوتیوب</i>",
 		safeTitle, safeFormat, sizeMB)
 
-	replyMarkupJson := fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 دریافت لینک مستقیم دانلود","url":"https://t.me/Filet0l1nkbot"}],[{"text":"👍 عالی بود","callback_data":"react:1:%s"},{"text":"👎 ضعیف بود","callback_data":"react:0:%s"}]]}`,
-		payload.VideoID, payload.VideoID)
+	replyMarkupJson := fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 دریافت لینک مستقیم دانلود","callback_data":"tolink:%s"}],[{"text":"👍 عالی بود","callback_data":"react:1:%s"},{"text":"👎 ضعیف بود","callback_data":"react:0:%s"}]]}`,
+		payload.VideoID, payload.VideoID, payload.VideoID)
 
 	if payload.PrefLang == "en" {
 		caption = fmt.Sprintf("✅ <b>Download Completed Successfully</b>\n\n🎬 <b>Title:</b> %s\n📁 <b>Quality:</b> <code>%s</code>\n📦 <b>File Size:</b> <code>%.2f MB</code>\n\n🌐 <b>Direct Download Link:</b> @Filet0l1nkbot\n🤖 <b>Downloader Bot:</b> @YouTubeDL_FastBot\n⚡ <i>Delivered by YouTube Downloader Bot</i>",
 			safeTitle, safeFormat, sizeMB)
-		replyMarkupJson = fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 Get Direct Download Link","url":"https://t.me/Filet0l1nkbot"}],[{"text":"👍 Loved it","callback_data":"react:1:%s"},{"text":"👎 Needs work","callback_data":"react:0:%s"}]]}`,
-			payload.VideoID, payload.VideoID)
+		replyMarkupJson = fmt.Sprintf(`{"inline_keyboard":[[{"text":"🌐 Get Direct Download Link","callback_data":"tolink:%s"}],[{"text":"👍 Loved it","callback_data":"react:1:%s"},{"text":"👎 Needs work","callback_data":"react:0:%s"}]]}`,
+			payload.VideoID, payload.VideoID, payload.VideoID)
 	}
 
 	// دریافت ابعاد دقیق ویدیویی و مدت زمان برای رندر ۱۶:۹ در تلگرام (بدون کادر مربعی)

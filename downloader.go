@@ -385,11 +385,18 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 
 func MergeVideoAudio(videoPath, audioPath, outputPath, token string) error {
 	startTime := time.Now()
-	Logger.Info("FFMPEG", token, "Merging Video (%s) + Audio (%s) -> %s", videoPath, audioPath, outputPath)
+	Logger.Info("FFMPEG", token, "Merging Video (%s) + Audio (%s) -> %s (Mapping stream 0:v:0 + stream 1:a:0)", videoPath, audioPath, outputPath)
 
-	cmd := exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", "-movflags", "+faststart", outputPath)
+	// اولویت اول: کپی مستقیم استریم‌ها با مپینگ دقیق ویدیو از ورودی اول و صدا از ورودی دوم
+	cmd := exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", outputPath)
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(startTime)
+
+	if err != nil {
+		Logger.Warn("FFMPEG", token, "FFmpeg AAC copy-encode failed, retrying with raw copy: %v", err)
+		cmd = exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", outputPath)
+		out, err = cmd.CombinedOutput()
+	}
 
 	if err != nil {
 		Logger.Error("FFMPEG", token, "FFmpeg merge FAILED after %v with error: %v. Output:\n%s", elapsed, err, string(out))

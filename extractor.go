@@ -349,12 +349,10 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 		}
 
 		if targetVideoURL != "" {
-			audioURL := ""
-			// اگر ویدیو DASH است یا اگر کاربر صوت متفاوتی را نسبت به صوت پیش‌فرض توکار ویدیو درخواست کرده
-			if !hasAudio || (audioLang != "" && audioLang != "default") {
-				audioURL = bestAudioURL
-				Logger.Info("EXTRACTOR", token, "Video stream (%s) attached with audio track [%s] for FFmpeg merge.", selectedQuality, selectedLangName)
-			} else {
+			audioURL := bestAudioURL
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Video stream (%s) attached with targeted audio track [%s] for FFmpeg audio replacement.", selectedQuality, selectedLangName)
+			} else if hasAudio {
 				Logger.Info("EXTRACTOR", token, "Video stream (%s) contains embedded audio.", selectedQuality)
 			}
 			return &ExtractedMedia{

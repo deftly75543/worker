@@ -160,7 +160,7 @@ func processTask(payload TaskPayload) {
 			return
 		}
 
-		if extracted.AudioURL != "" && !extracted.HasAudio {
+		if extracted.AudioURL != "" {
 			audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s_a.m4a", cleanToken))
 			onDashAudioProgress := func(written, total int64, speedMBs float64, percent int) {
 				mappedPercent := 80 + int(float64(percent)*0.08)
@@ -264,6 +264,16 @@ func processTask(payload TaskPayload) {
 		}
 		return
 	}
+
+	// بلافاصله پس از اتمام آپلود، تمامی فایل‌های محلی از دیسک پاک می‌شوند (Zero-Disk Retention)
+	if downloadedFile != "" {
+		_ = os.Remove(downloadedFile)
+	}
+	allTokenFiles, _ := filepath.Glob(filepath.Join(downloadDir, cleanToken+"*"))
+	for _, f := range allTokenFiles {
+		_ = os.Remove(f)
+	}
+	Logger.Info("TASK", token, "Zero-Disk Retention: Purged all temporary media files from disk for token %s", cleanToken)
 
 	// Delete status message
 	targetChatID := FormatChatID(payload.ChatID)
@@ -450,7 +460,23 @@ func main() {
 	http.HandleFunc("/api.php", handleProcess)
 	http.HandleFunc("/", handleProcess)
 
-	Logger.Info("SERVER", "SYSTEM", "🚀 Advanced Go Worker started on :%s (Version: 2.1, Go: %s)", port, startTime.Format(time.RFC3339))
+	Logger.Info("SERVER", "SYSTEM", "🚀 Advanced Go Worker started on :%s (Version: 2.2, Go: %s)", port, startTime.Format(time.RFC3339))
+
+	// موتور پاکسازی خودکار دیسک (Zero-Disk Retention Scrubber)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			downloadDir := getDownloadDir()
+			files, _ := filepath.Glob(filepath.Join(downloadDir, "*"))
+			for _, f := range files {
+				if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > 60*time.Second {
+					_ = os.Remove(f)
+					Logger.Debug("SCRUBBER", "SYSTEM", "Zero-Disk Retention: Purged stale temporary file %s", f)
+				}
+			}
+		}
+	}()
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		Logger.Critical("SERVER", "SYSTEM", "Fatal server listener error: %v", err)
