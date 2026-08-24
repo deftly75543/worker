@@ -72,7 +72,7 @@ func processTask(payload TaskPayload) {
 	// Step 1: 15% progress
 	UpdateProgress(payload, formatLabel, 15, "در حال استخراج لینک‌های دانلود از API")
 
-	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, payload.AudioLang, token)
+	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, payload.AudioLang, payload.RapidAPIKeys, token)
 	if err != nil {
 		if ctx.Err() != nil {
 			Logger.Info("TASK", token, "Task was cancelled during extraction")
@@ -467,6 +467,7 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 			if r.FormValue("data_saver") == "1" || r.FormValue("data_saver") == "true" {
 				payload.DataSaver = true
 			}
+			payload.RapidAPIKeys = r.FormValue("rapidapi_keys")
 		}
 	}
 

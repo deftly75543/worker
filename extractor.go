@@ -85,13 +85,16 @@ func parseFPS(val any) int {
 	}
 }
 
-func getRapidAPIKeys() []string {
+func getRapidAPIKeys(customKeys string) []string {
 	defaultKey := "ec2be8b14cmsh4a5fe1b3d472a19p13be78jsn655c7e8e540d"
-	envKeys := os.Getenv("RAPIDAPI_KEYS")
-	if envKeys == "" {
+	rawKeys := strings.TrimSpace(customKeys)
+	if rawKeys == "" {
+		rawKeys = strings.TrimSpace(os.Getenv("RAPIDAPI_KEYS"))
+	}
+	if rawKeys == "" {
 		return []string{defaultKey}
 	}
-	parts := strings.Split(envKeys, ",")
+	parts := strings.Split(rawKeys, ",")
 	var keys []string
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
@@ -251,7 +254,7 @@ func selectBestAudioStream(audios []RapidAPIAudioItem, targetLang, token string)
 	return audios[0].URL, name
 }
 
-func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMedia, error) {
+func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (*ExtractedMedia, error) {
 	videoID := extractVideoID(rawURL)
 	if videoID == "" {
 		Logger.Error("EXTRACTOR", token, "Invalid YouTube URL provided: %s", rawURL)
@@ -260,7 +263,7 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 
 	Logger.Info("EXTRACTOR", token, "Starting extraction for VideoID: %s, Requested Quality: %s, AudioLang: %s", videoID, quality, audioLang)
 
-	keys := getRapidAPIKeys()
+	keys := getRapidAPIKeys(customKeys)
 	client := &http.Client{Timeout: 25 * time.Second}
 
 	var lastErr error
@@ -428,12 +431,193 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 		}
 	}
 
+	Logger.Warn("EXTRACTOR", token, "Primary RapidAPI provider failed or rate-limited. Falling back to Cloud Api Hub provider...")
+	cloudMedia, cloudErr := extractFromCloudApiHub(videoID, quality, audioLang, keys, token)
+	if cloudErr == nil && cloudMedia != nil {
+		return cloudMedia, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "Cloud Api Hub provider failed. Falling back to YouTube Info & Download API provider...")
+	infoMedia, infoErr := extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang, keys, token)
+	if infoErr == nil && infoMedia != nil {
+		return infoMedia, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "YouTube Info & Download API failed. Falling back to YouTube Video And Shorts Downloader provider...")
+	shortsMedia, shortsErr := extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang, keys, token)
+	if shortsErr == nil && shortsMedia != nil {
+		return shortsMedia, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader failed. Falling back to YouTube Video And Shorts Downloader V2 provider...")
+	v2Media, v2Err := extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang, keys, token)
+	if v2Err == nil && v2Media != nil {
+		return v2Media, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader V2 failed. Falling back to YouTube MP4/MP3 Downloader provider...")
+	mp4Media, mp4Err := extractFromYouTubeMp4Mp3Downloader(videoID, quality, audioLang, keys, token)
+	Logger.Warn("EXTRACTOR", token, "YouTube MP4/MP3 Downloader failed. Falling back to Ziyotech Youtube Downloader API provider...")
+	ziyoMedia, ziyoErr := extractFromZiyotech(videoID, quality, audioLang, keys, token)
+	if ziyoErr == nil && ziyoMedia != nil {
+		return ziyoMedia, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "Ziyotech API failed. Falling back to YouTube Quick Video Downloader provider...")
+	quickMedia, quickErr := extractFromYouTubeQuickVideoDownloader(videoID, quality, audioLang, keys, token)
+	if quickErr == nil && quickMedia != nil {
+		return quickMedia, nil
+	}
+
 	if lastErr != nil {
-		Logger.Error("EXTRACTOR", token, "All RapidAPI keys exhausted. Last error: %v", lastErr)
+		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and keys exhausted. Last error: %v", lastErr)
 		return nil, lastErr
 	}
 	Logger.Error("EXTRACTOR", token, "No suitable video stream found in RapidAPI response")
 	return nil, fmt.Errorf("no suitable video stream found")
+}
+
+func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying Cloud Api Hub provider with key #%d (%s)", idx+1, maskedKey)
+
+		reqURL := fmt.Sprintf("https://cloud-api-hub-youtube-downloader.p.rapidapi.com/download?id=%s", url.QueryEscape(videoID))
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("x-rapidapi-host", "cloud-api-hub-youtube-downloader.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("cloud api hub returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		var formatItems []any
+		if f, ok := rawMap["formats"].([]any); ok {
+			formatItems = f
+		} else if d, ok := rawMap["data"].([]any); ok {
+			formatItems = d
+		} else if v, ok := rawMap["videos"].([]any); ok {
+			formatItems = v
+		}
+
+		var videoURL, audioURL string
+		hasAudio := false
+
+		for _, item := range formatItems {
+			im, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			u := ""
+			if uStr, ok := im["url"].(string); ok {
+				u = uStr
+			} else if lStr, ok := im["link"].(string); ok {
+				u = lStr
+			} else if dStr, ok := im["downloadUrl"].(string); ok {
+				u = dStr
+			}
+
+			if u == "" {
+				continue
+			}
+
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			}
+
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
+			itemHasAudio := false
+			if ha, ok := im["hasAudio"].(bool); ok {
+				itemHasAudio = ha
+			}
+			itemHasVideo := true
+			if hv, ok := im["hasVideo"].(bool); ok {
+				itemHasVideo = hv
+			}
+
+			if isAudioStream || (!itemHasVideo && itemHasAudio) {
+				if audioURL == "" {
+					audioURL = u
+				}
+			} else if itemHasVideo {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+					videoURL = u
+					hasAudio = itemHasAudio
+				} else if videoURL == "" {
+					videoURL = u
+					hasAudio = itemHasAudio
+				}
+			}
+		}
+
+		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudioOnly {
+			if audioURL == "" {
+				audioURL = videoURL
+			}
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Successfully extracted audio from Cloud Api Hub")
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      audioURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+		}
+
+		if videoURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted video from Cloud Api Hub")
+			if audioURL == "" && !hasAudio {
+				inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+				if inErr == nil && inURL != "" {
+					audioURL = inURL
+				}
+			}
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      videoURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      hasAudio && audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
 }
 
 func ExtractFromInnertube(videoID, targetLang, token string) (string, string, error) {
@@ -530,4 +714,789 @@ func ExtractFromInnertube(videoID, targetLang, token string) (string, string, er
 	}
 
 	return "", "", fmt.Errorf("no matching audio track in Innertube for lang: %s", targetLang)
+}
+
+func extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	format := quality
+	if quality == "audio" || quality == "mp3" || quality == "m4a" {
+		format = "mp3"
+	} else if quality == "1080p60" || quality == "1080" {
+		format = "1080"
+	} else if quality == "720p60" || quality == "720" {
+		format = "720"
+	} else if quality == "480" {
+		format = "480"
+	} else if quality == "360" {
+		format = "360"
+	} else {
+		format = "720"
+	}
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying YouTube Info & Download API with key #%d (%s)", idx+1, maskedKey)
+
+		vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+		reqURL := fmt.Sprintf("https://youtube-info-download-api.p.rapidapi.com/ajax/download.php?copyright=0&format=%s&url=%s&audio_quality=128&no_merge=false",
+			url.QueryEscape(format), url.QueryEscape(vURL))
+
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("x-rapidapi-host", "youtube-info-download-api.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("youtube-info-download-api returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		streamURL := ""
+		if u, ok := rawMap["url"].(string); ok && u != "" {
+			streamURL = u
+		} else if l, ok := rawMap["link"].(string); ok && l != "" {
+			streamURL = l
+		} else if d, ok := rawMap["download_url"].(string); ok && d != "" {
+			streamURL = d
+		} else if du, ok := rawMap["downloadUrl"].(string); ok && du != "" {
+			streamURL = du
+		}
+
+		if streamURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted stream from YouTube Info & Download API!")
+			isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+			if isAudioOnly {
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      streamURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+
+			audioURL := ""
+			inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+			if inErr == nil && inURL != "" {
+				audioURL = inURL
+			}
+
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      streamURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying YouTube Video And Shorts Downloader with key #%d (%s)", idx+1, maskedKey)
+
+		reqURL := fmt.Sprintf("https://youtube-video-and-shorts-downloader1.p.rapidapi.com/youtube/v3/video/details?videoId=%s", url.QueryEscape(videoID))
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("x-rapidapi-host", "youtube-video-and-shorts-downloader1.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("youtube-video-and-shorts-downloader1 returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		var formatItems []any
+		if v, ok := rawMap["videos"].([]any); ok {
+			formatItems = v
+		} else if f, ok := rawMap["formats"].([]any); ok {
+			formatItems = f
+		} else if d, ok := rawMap["data"].([]any); ok {
+			formatItems = d
+		}
+
+		var videoURL, audioURL string
+		hasAudio := false
+
+		for _, item := range formatItems {
+			im, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			u := ""
+			if uStr, ok := im["url"].(string); ok {
+				u = uStr
+			} else if lStr, ok := im["link"].(string); ok {
+				u = lStr
+			} else if dStr, ok := im["downloadUrl"].(string); ok {
+				u = dStr
+			}
+
+			if u == "" {
+				continue
+			}
+
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			}
+
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
+			itemHasAudio := false
+			if ha, ok := im["hasAudio"].(bool); ok {
+				itemHasAudio = ha
+			}
+			itemHasVideo := true
+			if hv, ok := im["hasVideo"].(bool); ok {
+				itemHasVideo = hv
+			}
+
+			if isAudioStream || (!itemHasVideo && itemHasAudio) {
+				if audioURL == "" {
+					audioURL = u
+				}
+			} else if itemHasVideo {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+					videoURL = u
+					hasAudio = itemHasAudio
+				} else if videoURL == "" {
+					videoURL = u
+					hasAudio = itemHasAudio
+				}
+			}
+		}
+
+		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudioOnly {
+			if audioURL == "" {
+				audioURL = videoURL
+			}
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Successfully extracted audio from YouTube Video And Shorts Downloader")
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      audioURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+		}
+
+		if videoURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted video from YouTube Video And Shorts Downloader")
+			if audioURL == "" && !hasAudio {
+				inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+				if inErr == nil && inURL != "" {
+					audioURL = inURL
+				}
+			}
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      videoURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      hasAudio && audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying YouTube Video And Shorts Downloader V2 with key #%d (%s)", idx+1, maskedKey)
+
+		reqURL := fmt.Sprintf("https://youtube-video-and-shorts-downloader.p.rapidapi.com/download.php?id=%s", url.QueryEscape(videoID))
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("x-rapidapi-host", "youtube-video-and-shorts-downloader.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("youtube-video-and-shorts-downloader (V2) returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		var formatItems []any
+		if v, ok := rawMap["videos"].([]any); ok {
+			formatItems = v
+		} else if f, ok := rawMap["formats"].([]any); ok {
+			formatItems = f
+		} else if d, ok := rawMap["data"].([]any); ok {
+			formatItems = d
+		}
+
+		var videoURL, audioURL string
+		hasAudio := false
+
+		for _, item := range formatItems {
+			im, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			u := ""
+			if uStr, ok := im["url"].(string); ok {
+				u = uStr
+			} else if lStr, ok := im["link"].(string); ok {
+				u = lStr
+			} else if dStr, ok := im["downloadUrl"].(string); ok {
+				u = dStr
+			}
+
+			if u == "" {
+				continue
+			}
+
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			}
+
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
+			itemHasAudio := false
+			if ha, ok := im["hasAudio"].(bool); ok {
+				itemHasAudio = ha
+			}
+			itemHasVideo := true
+			if hv, ok := im["hasVideo"].(bool); ok {
+				itemHasVideo = hv
+			}
+
+			if isAudioStream || (!itemHasVideo && itemHasAudio) {
+				if audioURL == "" {
+					audioURL = u
+				}
+			} else if itemHasVideo {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+					videoURL = u
+					hasAudio = itemHasAudio
+				} else if videoURL == "" {
+					videoURL = u
+					hasAudio = itemHasAudio
+				}
+			}
+		}
+
+		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudioOnly {
+			if audioURL == "" {
+				audioURL = videoURL
+			}
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Successfully extracted audio from YouTube Video And Shorts Downloader V2")
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      audioURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+		}
+
+		if videoURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted video from YouTube Video And Shorts Downloader V2")
+			if audioURL == "" && !hasAudio {
+				inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+				if inErr == nil && inURL != "" {
+					audioURL = inURL
+				}
+			}
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      videoURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      hasAudio && audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+func extractFromYouTubeMp4Mp3Downloader(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	format := quality
+	if quality == "audio" || quality == "mp3" || quality == "m4a" {
+		format = "mp3"
+	} else if quality == "1080p60" || quality == "1080" {
+		format = "1080"
+	} else if quality == "720p60" || quality == "720" {
+		format = "720"
+	} else if quality == "480" {
+		format = "480"
+	} else if quality == "360" {
+		format = "360"
+	} else {
+		format = "720"
+	}
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying YouTube MP4/MP3 Downloader with key #%d (%s)", idx+1, maskedKey)
+
+		reqURL := fmt.Sprintf("https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download?format=%s&id=%s&audioQuality=128&addInfo=false&allowExtendedDuration=false",
+			url.QueryEscape(format), url.QueryEscape(videoID))
+
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("x-rapidapi-host", "youtube-mp4-mp3-downloader.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("youtube-mp4-mp3-downloader returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		streamURL := ""
+		if u, ok := rawMap["url"].(string); ok && u != "" {
+			streamURL = u
+		} else if l, ok := rawMap["link"].(string); ok && l != "" {
+			streamURL = l
+		} else if d, ok := rawMap["download_url"].(string); ok && d != "" {
+			streamURL = d
+		} else if du, ok := rawMap["downloadUrl"].(string); ok && du != "" {
+			streamURL = du
+		}
+
+		if streamURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted stream from YouTube MP4/MP3 Downloader!")
+			isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+			if isAudioOnly {
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      streamURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+
+			audioURL := ""
+			inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+			if inErr == nil && inURL != "" {
+				audioURL = inURL
+			}
+
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      streamURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+func extractFromZiyotech(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying Ziyotech Youtube Downloader API with key #%d (%s)", idx+1, maskedKey)
+
+		vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+		formData := url.Values{}
+		formData.Set("url", vURL)
+		formData.Set("mode", "auto")
+
+		req, err := http.NewRequest("POST", "https://ziyotech-youtube-downloader-api.p.rapidapi.com/rapid/api/", strings.NewReader(formData.Encode()))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("x-rapidapi-host", "ziyotech-youtube-downloader-api.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("ziyotech api returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		var formatItems []any
+		if m, ok := rawMap["media"].([]any); ok {
+			formatItems = m
+		} else if f, ok := rawMap["formats"].([]any); ok {
+			formatItems = f
+		} else if d, ok := rawMap["data"].([]any); ok {
+			formatItems = d
+		} else if v, ok := rawMap["videos"].([]any); ok {
+			formatItems = v
+		}
+
+		var videoURL, audioURL string
+		hasAudio := false
+
+		for _, item := range formatItems {
+			im, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			u := ""
+			if uStr, ok := im["url"].(string); ok {
+				u = uStr
+			} else if lStr, ok := im["link"].(string); ok {
+				u = lStr
+			} else if dStr, ok := im["downloadUrl"].(string); ok {
+				u = dStr
+			}
+
+			if u == "" {
+				continue
+			}
+
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			}
+
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["type"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			}
+
+			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio") || strings.Contains(qStr, "audio") || strings.Contains(qStr, "mp3")
+
+			if isAudioStream {
+				if audioURL == "" {
+					audioURL = u
+				}
+			} else {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+					videoURL = u
+				} else if videoURL == "" {
+					videoURL = u
+				}
+			}
+		}
+
+		if videoURL == "" && audioURL == "" {
+			if directURL, ok := rawMap["url"].(string); ok && directURL != "" {
+				videoURL = directURL
+			}
+		}
+
+		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudioOnly {
+			if audioURL == "" {
+				audioURL = videoURL
+			}
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Successfully extracted audio from Ziyotech API")
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      audioURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+		}
+
+		if videoURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted video from Ziyotech API")
+			if audioURL == "" && !hasAudio {
+				inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+				if inErr == nil && inURL != "" {
+					audioURL = inURL
+				}
+			}
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      videoURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      hasAudio && audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+func extractFromYouTubeQuickVideoDownloader(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
+	for idx, key := range keys {
+		maskedKey := "..." + key[len(key)-6:]
+		Logger.Info("EXTRACTOR", token, "Trying YouTube Quick Video Downloader with key #%d (%s)", idx+1, maskedKey)
+
+		vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+		jsonBody, _ := json.Marshal(map[string]string{"url": vURL})
+
+		req, err := http.NewRequest("POST", "https://youtube-quick-video-downloader.p.rapidapi.com/api/youtube/links", bytes.NewReader(jsonBody))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-rapidapi-host", "youtube-quick-video-downloader.p.rapidapi.com")
+		req.Header.Set("x-rapidapi-key", key)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("youtube-quick-video-downloader returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		var rawMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
+		var formatItems []any
+		if f, ok := rawMap["formats"].([]any); ok {
+			formatItems = f
+		} else if l, ok := rawMap["links"].([]any); ok {
+			formatItems = l
+		} else if d, ok := rawMap["data"].([]any); ok {
+			formatItems = d
+		} else if v, ok := rawMap["videos"].([]any); ok {
+			formatItems = v
+		}
+
+		var videoURL, audioURL string
+		hasAudio := false
+
+		for _, item := range formatItems {
+			im, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			u := ""
+			if uStr, ok := im["url"].(string); ok {
+				u = uStr
+			} else if lStr, ok := im["link"].(string); ok {
+				u = lStr
+			} else if dStr, ok := im["downloadUrl"].(string); ok {
+				u = dStr
+			}
+
+			if u == "" {
+				continue
+			}
+
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			}
+
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
+			}
+
+			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio") || strings.Contains(qStr, "audio") || strings.Contains(qStr, "mp3")
+
+			if isAudioStream {
+				if audioURL == "" {
+					audioURL = u
+				}
+			} else {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+					videoURL = u
+				} else if videoURL == "" {
+					videoURL = u
+				}
+			}
+		}
+
+		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudioOnly {
+			if audioURL == "" {
+				audioURL = videoURL
+			}
+			if audioURL != "" {
+				Logger.Info("EXTRACTOR", token, "Successfully extracted audio from YouTube Quick Video Downloader")
+				return &ExtractedMedia{
+					Type:          "audio",
+					Title:         title,
+					AudioURL:      audioURL,
+					AudioLangName: "صوت اصلی",
+					HasAudio:      true,
+				}, nil
+			}
+		}
+
+		if videoURL != "" {
+			Logger.Info("EXTRACTOR", token, "Successfully extracted video from YouTube Quick Video Downloader")
+			if audioURL == "" && !hasAudio {
+				inURL, _, inErr := ExtractFromInnertube(videoID, audioLang, token)
+				if inErr == nil && inURL != "" {
+					audioURL = inURL
+				}
+			}
+			return &ExtractedMedia{
+				Type:          "video",
+				Title:         title,
+				VideoURL:      videoURL,
+				AudioURL:      audioURL,
+				AudioLangName: "پیش‌فرض",
+				HasAudio:      hasAudio && audioURL == "",
+			}, nil
+		}
+	}
+
+	return nil, lastErr
 }

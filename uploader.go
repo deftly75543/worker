@@ -24,12 +24,12 @@ var uploadTransport = &http.Transport{
 		KeepAlive: 60 * time.Second,
 	}).DialContext,
 	ForceAttemptHTTP2:   true,
-	MaxIdleConns:        100,
-	MaxIdleConnsPerHost: 20,
+	MaxIdleConns:        500,
+	MaxIdleConnsPerHost: 100,
 	IdleConnTimeout:     120 * time.Second,
 	TLSHandshakeTimeout: 8 * time.Second,
 	ReadBufferSize:      512 * 1024,
-	WriteBufferSize:     512 * 1024,
+	WriteBufferSize:     1024 * 1024,
 }
 
 var globalUploadClient = &http.Client{
@@ -55,6 +55,7 @@ type TaskPayload struct {
 	BotToken          string `json:"bot_token"`
 	MasterCallbackURL string `json:"master_callback_url"`
 	Secret            string `json:"secret"`
+	RapidAPIKeys      string `json:"rapidapi_keys"`
 }
 
 var (

@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+var chunkBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 512*1024)
+		return &b
+	},
+}
+
 type ProgressTracker struct {
 	Total      int64
 	Written    int64
@@ -229,7 +236,8 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 					continue
 				}
 
-				buf := make([]byte, 512*1024)
+				bufPtr := chunkBufferPool.Get().(*[]byte)
+				buf := *bufPtr
 				currentOffset := startByte
 				var threadWrittenThisAttempt int64
 
@@ -259,6 +267,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 					}
 				}
 				resp.Body.Close()
+				chunkBufferPool.Put(bufPtr)
 
 				if chunkErr == nil {
 					return
@@ -388,13 +397,13 @@ func MergeVideoAudio(videoPath, audioPath, outputPath, token string) error {
 	Logger.Info("FFMPEG", token, "Merging Video (%s) + Audio (%s) -> %s (Mapping stream 0:v:0 + stream 1:a:0)", videoPath, audioPath, outputPath)
 
 	// اولویت اول: کپی مستقیم استریم‌ها با مپینگ دقیق ویدیو از ورودی اول و صدا از ورودی دوم
-	cmd := exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", outputPath)
+	cmd := exec.Command("ffmpeg", "-y", "-threads", "0", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", outputPath)
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(startTime)
 
 	if err != nil {
-		Logger.Warn("FFMPEG", token, "FFmpeg AAC copy-encode failed, retrying with raw copy: %v", err)
-		cmd = exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", outputPath)
+		Logger.Warn("FFMPEG", token, "FFmpeg direct copy failed, retrying with AAC audio copy-encode: %v", err)
+		cmd = exec.Command("ffmpeg", "-y", "-threads", "0", "-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", outputPath)
 		out, err = cmd.CombinedOutput()
 	}
 
