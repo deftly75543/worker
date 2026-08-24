@@ -249,6 +249,7 @@ func processTask(payload TaskPayload) {
 			downloadedFile = videoPath
 		}
 	}
+}
 
 	// Step 3: 95% Uploading & Media Transformations
 	UpdateProgress(payload, formatLabel, 95, "در حال پردازش و آپلود نهایی در تلگرام")
