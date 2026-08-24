@@ -118,8 +118,21 @@ func getAudioLang(item RapidAPIAudioItem) (code string, name string, isOrig bool
 		code = strings.ToLower(item.Language)
 	}
 
+	if code == "" && item.AudioTrack.ID != "" {
+		idLower := strings.ToLower(item.AudioTrack.ID)
+		if strings.HasPrefix(idLower, "fa") || strings.Contains(idLower, "per") || strings.Contains(idLower, "fas") || strings.Contains(idLower, "farsi") {
+			code = "fa"
+		} else if strings.HasPrefix(idLower, "en") || strings.Contains(idLower, "eng") {
+			code = "en"
+		} else if strings.HasPrefix(idLower, "es") || strings.Contains(idLower, "spa") {
+			code = "es"
+		} else if strings.HasPrefix(idLower, "ar") || strings.Contains(idLower, "ara") {
+			code = "ar"
+		}
+	}
+
 	nameLower := strings.ToLower(name)
-	if item.IsOriginal || strings.Contains(nameLower, "original") || strings.Contains(nameLower, "اصلی") {
+	if item.IsOriginal || item.AudioTrack.AudioIsDefault || strings.Contains(nameLower, "original") || strings.Contains(nameLower, "اصلی") {
 		isOrig = true
 	}
 
@@ -127,25 +140,26 @@ func getAudioLang(item RapidAPIAudioItem) (code string, name string, isOrig bool
 		if strings.Contains(nameLower, "persian") || strings.Contains(nameLower, "farsi") || strings.Contains(nameLower, "فارسی") || strings.Contains(nameLower, "fa") {
 			code = "fa"
 			if name == "" {
-				name = "فارسی (زبان اصلی)"
+				name = "فارسی"
 			}
-		} else if strings.Contains(nameLower, "english") || strings.Contains(nameLower, "en") {
+		} else if strings.Contains(nameLower, "english") || strings.Contains(nameLower, "en") || strings.Contains(nameLower, "انگلیسی") {
 			code = "en"
 			if name == "" {
 				name = "English"
 			}
-		} else if strings.Contains(nameLower, "spanish") || strings.Contains(nameLower, "es") {
+		} else if strings.Contains(nameLower, "spanish") || strings.Contains(nameLower, "es") || strings.Contains(nameLower, "اسپانیایی") {
 			code = "es"
-		} else if strings.Contains(nameLower, "arabic") || strings.Contains(nameLower, "ar") {
+		} else if strings.Contains(nameLower, "arabic") || strings.Contains(nameLower, "ar") || strings.Contains(nameLower, "عربی") {
 			code = "ar"
 		}
 	}
 
 	if code == "" && item.URL != "" {
-		if strings.Contains(item.URL, "lang=fa") || strings.Contains(item.URL, "lang=fas") || strings.Contains(item.URL, "lang=per") {
+		urlLower := strings.ToLower(item.URL)
+		if strings.Contains(urlLower, "lang=fa") || strings.Contains(urlLower, "lang=fas") || strings.Contains(urlLower, "lang=per") || strings.Contains(urlLower, "audio_track=fa") {
 			code = "fa"
 			name = "فارسی"
-		} else if strings.Contains(item.URL, "lang=en") {
+		} else if strings.Contains(urlLower, "lang=en") || strings.Contains(urlLower, "audio_track=en") {
 			code = "en"
 			name = "English"
 		}
@@ -164,28 +178,42 @@ func selectBestAudioStream(audios []RapidAPIAudioItem, targetLang, token string)
 
 	targetLang = strings.ToLower(strings.TrimSpace(targetLang))
 
+	Logger.Info("EXTRACTOR", token, "Evaluating %d available audio track(s) for requested language [%s]", len(audios), targetLang)
+	for i, item := range audios {
+		c, n, orig := getAudioLang(item)
+		Logger.Info("EXTRACTOR", token, "  Option #%d: Code='%s', Name='%s', Orig=%v, Quality='%s', TrackID='%s'", i+1, c, n, orig, item.Quality, item.AudioTrack.ID)
+	}
+
 	// ۱. اگر کاربر صریحاً زبانی را انتخاب کرده بود (مثلاً fa یا en یا orig)
 	if targetLang != "" && targetLang != "default" {
-		// انتخاب بر اساس کد زبان (fa, en, es, ...)
 		for _, item := range audios {
 			code, name, isOrig := getAudioLang(item)
-			if targetLang == "orig" && (isOrig || item.IsOriginal || strings.Contains(strings.ToLower(name), "original") || strings.Contains(name, "اصلی")) {
-				Logger.Info("EXTRACTOR", token, "Matched explicitly requested Original Audio Track: %s (%s)", name, item.Quality)
+			if targetLang == "orig" && isOrig {
+				Logger.Info("EXTRACTOR", token, "Matched requested Original Audio Track: %s (%s)", name, item.Quality)
+				return item.URL, name
+			}
+			if targetLang == "fa" && (code == "fa" || strings.Contains(strings.ToLower(name), "persian") || strings.Contains(strings.ToLower(name), "farsi") || strings.Contains(name, "فارسی")) {
+				Logger.Info("EXTRACTOR", token, "Matched requested Persian Audio Track: %s (%s)", name, item.Quality)
+				return item.URL, name
+			}
+			if targetLang == "en" && (code == "en" || strings.Contains(strings.ToLower(name), "english") || strings.Contains(name, "انگلیسی")) {
+				Logger.Info("EXTRACTOR", token, "Matched requested English Audio Track: %s (%s)", name, item.Quality)
 				return item.URL, name
 			}
 			if code == targetLang || strings.EqualFold(code, targetLang) || strings.Contains(strings.ToLower(name), targetLang) {
-				Logger.Info("EXTRACTOR", token, "Matched explicitly requested audio language [%s]: %s (%s)", targetLang, name, item.Quality)
+				Logger.Info("EXTRACTOR", token, "Matched requested Audio Track [%s]: %s (%s)", targetLang, name, item.Quality)
 				return item.URL, name
 			}
 		}
+		Logger.Warn("EXTRACTOR", token, "Requested audio track [%s] not explicitly found among tracks, falling back to smart prioritization", targetLang)
 	}
 
-	// ۲. اگر زبانی مشخص نشده بود، استراتژی پیش‌فرض هوشمند (Smart Default):
-	// اولویت اول: زبان فارسی (Persian / Farsi)
+	// ۲. استراتژی هوشمند (Smart Priority):
+	// اولویت اول: زبان فارسی اگر موجود باشد
 	for _, item := range audios {
 		code, name, _ := getAudioLang(item)
 		if code == "fa" || strings.Contains(strings.ToLower(name), "persian") || strings.Contains(strings.ToLower(name), "farsi") || strings.Contains(name, "فارسی") {
-			Logger.Info("EXTRACTOR", token, "Smart Priority Auto-Selected Persian Audio: %s (%s)", name, item.Quality)
+			Logger.Info("EXTRACTOR", token, "Smart Priority Selected Persian Audio: %s (%s)", name, item.Quality)
 			return item.URL, name
 		}
 	}
@@ -194,12 +222,12 @@ func selectBestAudioStream(audios []RapidAPIAudioItem, targetLang, token string)
 	for _, item := range audios {
 		_, name, isOrig := getAudioLang(item)
 		if isOrig || item.IsOriginal || item.AudioTrack.AudioIsDefault || strings.Contains(strings.ToLower(name), "original") || strings.Contains(name, "اصلی") {
-			Logger.Info("EXTRACTOR", token, "Smart Priority Auto-Selected Original Audio Track: %s (%s)", name, item.Quality)
+			Logger.Info("EXTRACTOR", token, "Smart Priority Selected Original Audio: %s (%s)", name, item.Quality)
 			return item.URL, name
 		}
 	}
 
-	// اولویت سوم: ترک پیش‌فرض یا اولین ترک با بالاترین کیفیت
+	// اولویت سوم: ترک پیش‌فرض یا بالاترین کیفیت
 	for _, item := range audios {
 		if item.IsDefault || item.AudioTrack.AudioIsDefault {
 			_, name, _ := getAudioLang(item)

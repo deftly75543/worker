@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,26 @@ import (
 	"sync"
 	"time"
 )
+
+var uploadTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 60 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 20,
+	IdleConnTimeout:     120 * time.Second,
+	TLSHandshakeTimeout: 8 * time.Second,
+	ReadBufferSize:      512 * 1024,
+	WriteBufferSize:     512 * 1024,
+}
+
+var globalUploadClient = &http.Client{
+	Transport: uploadTransport,
+	Timeout:   35 * time.Minute,
+}
 
 type TaskPayload struct {
 	TaskToken         string `json:"task_token"`
@@ -373,8 +394,7 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		req.Header.Set("Content-Type", mpWriter.FormDataContentType())
 	}
 
-	uploadClient := &http.Client{Timeout: 35 * time.Minute}
-	upResp, err := uploadClient.Do(req)
+	upResp, err := globalUploadClient.Do(req)
 	uploadElapsed := time.Since(startTime)
 
 	if err != nil {

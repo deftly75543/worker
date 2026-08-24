@@ -136,53 +136,75 @@ func processTask(payload TaskPayload) {
 		downloadedFile = audioPath
 	} else {
 		videoPath := filepath.Join(downloadDir, fmt.Sprintf("%s_v.mp4", cleanToken))
-		onVideoProgress := func(written, total int64, speedMBs float64, percent int) {
-			mappedPercent := 20 + int(float64(percent)*0.60)
-			UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دانلود پرسرعت استریم")
+		audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s_a.m4a", cleanToken))
+
+		var videoErr, audioErr error
+		var wgDL sync.WaitGroup
+
+		var vWritten, vTotal int64
+		var vSpeed float64
+		var vPercent int
+
+		wgDL.Add(1)
+		go func() {
+			defer wgDL.Done()
+			onVideoProgress := func(written, total int64, speedMBs float64, percent int) {
+				atomic.StoreInt64(&vWritten, written)
+				atomic.StoreInt64(&vTotal, total)
+				vSpeed = speedMBs
+				vPercent = percent
+				mappedPercent := 20 + int(float64(percent)*0.68)
+				stageMsg := "در حال دانلود پرسرعت موازی"
+				if payload.PrefLang == "en" {
+					stageMsg = "Downloading video & audio in parallel"
+				}
+				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, stageMsg)
+			}
+			videoErr = DownloadStream(ctx, extracted.VideoURL, videoPath, 25*time.Minute, token, "Video Stream", onVideoProgress)
+		}()
+
+		if extracted.AudioURL != "" {
+			wgDL.Add(1)
+			go func() {
+				defer wgDL.Done()
+				audioErr = DownloadStream(ctx, extracted.AudioURL, audioPath, 15*time.Minute, token, "Parallel Audio Stream", nil)
+			}()
 		}
 
-		if err := DownloadStream(ctx, extracted.VideoURL, videoPath, 25*time.Minute, token, "Video Stream", onVideoProgress); err != nil {
+		wgDL.Wait()
+
+		if videoErr != nil {
 			if ctx.Err() != nil {
 				Logger.Info("TASK", token, "Video download cancelled by user")
 				return
 			}
-			Logger.Error("TASK", token, "Video stream download FAILED: %v", err)
-			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+err.Error(), token)
+			Logger.Error("TASK", token, "Video stream download FAILED: %v", videoErr)
+			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+videoErr.Error(), token)
 			if payload.MasterCallbackURL != "" {
 				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
 					"action":            "error",
 					"secret":            payload.Secret,
 					"chat_id":           FormatChatID(payload.ChatID),
 					"status_message_id": payload.StatusMessageID,
-					"error":             err.Error(),
+					"error":             videoErr.Error(),
 				}, token)
 			}
 			return
 		}
 
-		if extracted.AudioURL != "" {
-			audioPath := filepath.Join(downloadDir, fmt.Sprintf("%s_a.m4a", cleanToken))
-			onDashAudioProgress := func(written, total int64, speedMBs float64, percent int) {
-				mappedPercent := 80 + int(float64(percent)*0.08)
-				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دریافت استریم صوتی HD")
+		if extracted.AudioURL != "" && audioErr == nil {
+			mergeMsg := "در حال ادغام فوق‌سریع صدا و تصویر"
+			if payload.PrefLang == "en" {
+				mergeMsg = "Fast merging video and audio tracks"
 			}
-
-			if err := DownloadStream(ctx, extracted.AudioURL, audioPath, 10*time.Minute, token, "DASH Separate Audio", onDashAudioProgress); err == nil {
-				UpdateProgress(payload, formatLabel, 90, "در حال ادغام صدا و ویدیو با کیفیت اصلی")
-				mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
-				if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
-					_ = os.Remove(videoPath)
-					_ = os.Remove(audioPath)
-					downloadedFile = mergedPath
-				} else {
-					Logger.Warn("TASK", token, "FFmpeg merge failed, proceeding with raw video without merged audio")
-					downloadedFile = videoPath
-				}
+			UpdateProgress(payload, formatLabel, 90, mergeMsg)
+			mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
+			if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
+				_ = os.Remove(videoPath)
+				_ = os.Remove(audioPath)
+				downloadedFile = mergedPath
 			} else {
-				if ctx.Err() != nil {
-					return
-				}
-				Logger.Warn("TASK", token, "Failed to download separate audio for DASH video: %v", err)
+				Logger.Warn("TASK", token, "FFmpeg merge failed, proceeding with raw video: %v", err)
 				downloadedFile = videoPath
 			}
 		} else {

@@ -92,13 +92,13 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 		}
 	}
 
-	// تنظیم مقیاس‌پذیر و پایدار تعداد کانکشن‌های موازی براساس حجم فایل جهت دستیابی به ۲۰ الی ۳۰+ مگابایت بر ثانیه
-	if contentLength > 6*1024*1024 && acceptRanges {
+	// تنظیم مقیاس‌پذیر و پایدار تعداد کانکشن‌های موازی جهت دستیابی به حداکثر سرعت شبکه (۳۰ الی ۵۰+ مگابایت بر ثانیه)
+	if contentLength > 4*1024*1024 && acceptRanges {
 		numThreads := 12
-		if contentLength > 80*1024*1024 {
-			numThreads = 24
-		} else if contentLength > 25*1024*1024 {
-			numThreads = 16
+		if contentLength > 50*1024*1024 {
+			numThreads = 32
+		} else if contentLength > 15*1024*1024 {
+			numThreads = 20
 		}
 		Logger.Info("DOWNLOADER", token, "Turbo Extreme Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
 			numThreads, float64(contentLength)/(1024*1024))
@@ -135,19 +135,19 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout:   8 * time.Second,
+			KeepAlive: 60 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          numThreads * 4,
 		MaxIdleConnsPerHost:   numThreads * 2,
 		MaxConnsPerHost:       numThreads * 2,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   8 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:   true,
-		ReadBufferSize:        128 * 1024,
-		WriteBufferSize:       128 * 1024,
+		ReadBufferSize:        512 * 1024,
+		WriteBufferSize:       512 * 1024,
 	}
 	defer transport.CloseIdleConnections()
 
@@ -162,7 +162,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 	// مانیتورینگ زنده و گزارش پیشرفت تجمیعی تمام کانال‌ها به تلگرام
 	go func() {
-		ticker := time.NewTicker(2000 * time.Millisecond)
+		ticker := time.NewTicker(2500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -229,7 +229,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 					continue
 				}
 
-				buf := make([]byte, 128*1024)
+				buf := make([]byte, 512*1024)
 				currentOffset := startByte
 				var threadWrittenThisAttempt int64
 
