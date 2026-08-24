@@ -457,6 +457,10 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 
 	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader V2 failed. Falling back to YouTube MP4/MP3 Downloader provider...")
 	mp4Media, mp4Err := extractFromYouTubeMp4Mp3Downloader(videoID, quality, audioLang, keys, token)
+	if mp4Err == nil && mp4Media != nil {
+		return mp4Media, nil
+	}
+
 	Logger.Warn("EXTRACTOR", token, "YouTube MP4/MP3 Downloader failed. Falling back to Ziyotech Youtube Downloader API provider...")
 	ziyoMedia, ziyoErr := extractFromZiyotech(videoID, quality, audioLang, keys, token)
 	if ziyoErr == nil && ziyoMedia != nil {
