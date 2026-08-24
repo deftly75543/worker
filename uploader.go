@@ -75,6 +75,11 @@ func UpdateTelegramMessage(botToken string, chatID any, messageID int, text, tok
 	form.Set("text", text)
 	form.Set("parse_mode", "HTML")
 
+	if token != "" {
+		replyMarkup := fmt.Sprintf(`{"inline_keyboard":[[{"text":"❌ لغو دانلود","callback_data":"cancel:%s"}]]}`, token)
+		form.Set("reply_markup", replyMarkup)
+	}
+
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.PostForm(apiURL, form)
 	if err != nil {

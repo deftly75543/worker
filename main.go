@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 var (
 	activeTasksMu sync.Mutex
 	activeTasks   = make(map[string]TaskPayload)
+	taskCancels   sync.Map
 	startTime     = time.Now()
 )
 
@@ -29,11 +31,16 @@ func processTask(payload TaskPayload) {
 	token := payload.TaskToken
 	taskStart := time.Now()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	taskCancels.Store(token, cancel)
+
 	activeTasksMu.Lock()
 	activeTasks[token] = payload
 	activeTasksMu.Unlock()
 
 	defer func() {
+		taskCancels.Delete(token)
+		cancel()
 		activeTasksMu.Lock()
 		delete(activeTasks, token)
 		activeTasksMu.Unlock()
@@ -66,6 +73,10 @@ func processTask(payload TaskPayload) {
 
 	extracted, err := ExtractFromRapidAPI(payload.VideoURL, payload.Quality, token)
 	if err != nil {
+		if ctx.Err() != nil {
+			Logger.Info("TASK", token, "Task was cancelled during extraction")
+			return
+		}
 		Logger.Error("TASK", token, "Extraction FAILED: %v", err)
 		UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID,
 			"❌ <b>خطا در دریافت لینک‌های مستقیم از یوتیوب:</b>\n"+err.Error(), token)
@@ -104,7 +115,11 @@ func processTask(payload TaskPayload) {
 			UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دانلود فایل صوتی MP3")
 		}
 
-		if err := DownloadStream(extracted.AudioURL, audioPath, 15*time.Minute, token, "Audio Stream", onAudioProgress); err != nil {
+		if err := DownloadStream(ctx, extracted.AudioURL, audioPath, 15*time.Minute, token, "Audio Stream", onAudioProgress); err != nil {
+			if ctx.Err() != nil {
+				Logger.Info("TASK", token, "Audio download cancelled by user")
+				return
+			}
 			Logger.Error("TASK", token, "Audio stream download FAILED: %v", err)
 			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل صوتی: "+err.Error(), token)
 			if payload.MasterCallbackURL != "" {
@@ -126,7 +141,11 @@ func processTask(payload TaskPayload) {
 			UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دانلود پرسرعت استریم")
 		}
 
-		if err := DownloadStream(extracted.VideoURL, videoPath, 25*time.Minute, token, "Video Stream", onVideoProgress); err != nil {
+		if err := DownloadStream(ctx, extracted.VideoURL, videoPath, 25*time.Minute, token, "Video Stream", onVideoProgress); err != nil {
+			if ctx.Err() != nil {
+				Logger.Info("TASK", token, "Video download cancelled by user")
+				return
+			}
 			Logger.Error("TASK", token, "Video stream download FAILED: %v", err)
 			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+err.Error(), token)
 			if payload.MasterCallbackURL != "" {
@@ -148,7 +167,7 @@ func processTask(payload TaskPayload) {
 				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, written, total, speedMBs, "در حال دریافت استریم صوتی HD")
 			}
 
-			if err := DownloadStream(extracted.AudioURL, audioPath, 10*time.Minute, token, "DASH Separate Audio", onDashAudioProgress); err == nil {
+			if err := DownloadStream(ctx, extracted.AudioURL, audioPath, 10*time.Minute, token, "DASH Separate Audio", onDashAudioProgress); err == nil {
 				UpdateProgress(payload, formatLabel, 90, "در حال ادغام صدا و ویدیو با کیفیت اصلی")
 				mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
 				if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
@@ -160,6 +179,9 @@ func processTask(payload TaskPayload) {
 					downloadedFile = videoPath
 				}
 			} else {
+				if ctx.Err() != nil {
+					return
+				}
 				Logger.Warn("TASK", token, "Failed to download separate audio for DASH video: %v", err)
 				downloadedFile = videoPath
 			}
@@ -293,6 +315,35 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Endpoint: /cancel یا /api/cancel
+	if action == "cancel" || path == "/cancel" || path == "/api/cancel" {
+		tokenToCancel := r.URL.Query().Get("token")
+		if tokenToCancel == "" {
+			var cancelBody struct {
+				TaskToken string `json:"task_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&cancelBody)
+			tokenToCancel = cancelBody.TaskToken
+		}
+		cancelled := false
+		if tokenToCancel != "" {
+			if val, ok := taskCancels.Load(tokenToCancel); ok {
+				if cancelFunc, isFn := val.(context.CancelFunc); isFn {
+					cancelFunc()
+					cancelled = true
+					Logger.Info("TASK", tokenToCancel, "Task CANCELLED by user request via API")
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":     "ok",
+			"cancelled":  cancelled,
+			"task_token": tokenToCancel,
+		})
+		return
+	}
+
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -337,6 +388,8 @@ func main() {
 	http.HandleFunc("/api/diag", handleProcess)
 	http.HandleFunc("/logs", handleProcess)
 	http.HandleFunc("/api/logs", handleProcess)
+	http.HandleFunc("/cancel", handleProcess)
+	http.HandleFunc("/api/cancel", handleProcess)
 	http.HandleFunc("/api/process", handleProcess)
 	http.HandleFunc("/api.php", handleProcess)
 	http.HandleFunc("/", handleProcess)
