@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -329,6 +330,16 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 		// انتخاب هوشمند ترک صوتی بر اساس درخواست کاربر یا اولویت فارسی/اصلی
 		bestAudioURL, selectedLangName := selectBestAudioStream(allAudios, audioLang, token)
 
+		// اگر زبان فارسی یا ترک خاصی خواسته شده و از RapidAPI دریافت نشد، مستقیماً از Innertube یوتیوب استعلام می‌کنیم
+		if (audioLang == "fa" && (bestAudioURL == "" || !strings.Contains(selectedLangName, "فارسی"))) || bestAudioURL == "" {
+			inURL, inName, inErr := ExtractFromInnertube(videoID, audioLang, token)
+			if inErr == nil && inURL != "" {
+				bestAudioURL = inURL
+				selectedLangName = inName
+				Logger.Info("EXTRACTOR", token, "Resolved targeted audio stream via YouTube Innertube: %s", selectedLangName)
+			}
+		}
+
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if bestAudioURL != "" {
@@ -423,4 +434,100 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, token string) (*ExtractedMe
 	}
 	Logger.Error("EXTRACTOR", token, "No suitable video stream found in RapidAPI response")
 	return nil, fmt.Errorf("no suitable video stream found")
+}
+
+func ExtractFromInnertube(videoID, targetLang, token string) (string, string, error) {
+	postBody, _ := json.Marshal(map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "ANDROID",
+				"clientVersion": "19.09.37",
+				"hl":            "fa",
+				"gl":            "IR",
+			},
+		},
+		"videoId": videoID,
+	})
+
+	req, err := http.NewRequest("POST", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false", bytes.NewReader(postBody))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	var pData struct {
+		StreamingData struct {
+			AdaptiveFormats []struct {
+				Itag             int    `json:"itag"`
+				URL              string `json:"url"`
+				MimeType         string `json:"mimeType"`
+				Bitrate          int    `json:"bitrate"`
+				AudioQuality     string `json:"audioQuality"`
+				ApproxDurationMs string `json:"approxDurationMs"`
+				AudioTrack       struct {
+					ID             string `json:"id"`
+					DisplayName    string `json:"displayName"`
+					AudioIsDefault bool   `json:"audioIsDefault"`
+				} `json:"audioTrack"`
+			} `json:"adaptiveFormats"`
+		} `json:"streamingData"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&pData); err != nil {
+		return "", "", err
+	}
+
+	targetLang = strings.ToLower(strings.TrimSpace(targetLang))
+	Logger.Info("INNERTUBE", token, "YouTube Innertube returned %d adaptive format(s)", len(pData.StreamingData.AdaptiveFormats))
+
+	var bestAudioURL, matchedName string
+	var bestBitrate int
+
+	for _, f := range pData.StreamingData.AdaptiveFormats {
+		if !strings.HasPrefix(f.MimeType, "audio/") || f.URL == "" {
+			continue
+		}
+
+		tId := strings.ToLower(f.AudioTrack.ID)
+		dName := f.AudioTrack.DisplayName
+		dNameLower := strings.ToLower(dName)
+		isFa := strings.HasPrefix(tId, "fa") || strings.Contains(tId, "per") || strings.Contains(dNameLower, "persian") || strings.Contains(dNameLower, "farsi") || strings.Contains(dNameLower, "فارسی")
+		isEn := strings.HasPrefix(tId, "en") || strings.Contains(dNameLower, "english")
+		isOrig := f.AudioTrack.AudioIsDefault || strings.Contains(dNameLower, "original") || strings.Contains(dNameLower, "اصلی")
+
+		if targetLang == "fa" && isFa {
+			if f.Bitrate > bestBitrate {
+				bestBitrate = f.Bitrate
+				bestAudioURL = f.URL
+				matchedName = "فارسی (" + dName + ")"
+			}
+		} else if targetLang == "en" && isEn {
+			if f.Bitrate > bestBitrate {
+				bestBitrate = f.Bitrate
+				bestAudioURL = f.URL
+				matchedName = "English (" + dName + ")"
+			}
+		} else if (targetLang == "orig" || targetLang == "default") && isOrig {
+			if f.Bitrate > bestBitrate {
+				bestBitrate = f.Bitrate
+				bestAudioURL = f.URL
+				matchedName = "Original (" + dName + ")"
+			}
+		}
+	}
+
+	if bestAudioURL != "" {
+		Logger.Info("INNERTUBE", token, "Successfully resolved audio from YouTube Innertube: %s", matchedName)
+		return bestAudioURL, matchedName, nil
+	}
+
+	return "", "", fmt.Errorf("no matching audio track in Innertube for lang: %s", targetLang)
 }

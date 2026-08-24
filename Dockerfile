@@ -21,11 +21,12 @@ COPY --from=bot_api_binary /usr/local/bin/telegram-bot-api /usr/local/bin/telegr
 # کپی باینری کامپایل‌شده ورکر
 COPY --from=builder /build/worker /app/worker
 
-# نصب FFmpeg و بسته‌های سیستمی ضروری
+# نصب FFmpeg، Python3، yt-dlp و بسته‌های سیستمی ضروری
 RUN apk add --no-cache \
     curl \
     ca-certificates \
     ffmpeg \
+    python3 \
     bash \
     dos2unix \
     tzdata \
@@ -33,6 +34,8 @@ RUN apk add --no-cache \
     libssl3 \
     libcrypto3 \
     zlib \
+    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app

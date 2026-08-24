@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -184,19 +185,43 @@ func processTask(payload TaskPayload) {
 			return
 		}
 
-		if extracted.AudioURL != "" && audioErr == nil {
-			mergeMsg := "در حال ادغام فوق‌سریع صدا و تصویر"
-			if payload.PrefLang == "en" {
-				mergeMsg = "Fast merging video and audio tracks"
+		if (extracted.AudioURL == "" || audioErr != nil) && (payload.AudioLang == "fa" || payload.AudioLang == "orig" || payload.AudioLang == "default") {
+			if _, lookErr := exec.LookPath("yt-dlp"); lookErr == nil {
+				Logger.Info("TASK", token, "Attempting direct audio extraction via yt-dlp for lang [%s]", payload.AudioLang)
+				formatSpec := "ba[language*=fa]/ba[language*=per]/ba[format_id*=fa]/ba[language_preference>0]/ba"
+				if payload.AudioLang == "en" {
+					formatSpec = "ba[language*=en]/ba[format_id*=en]/ba"
+				}
+				cmd := exec.CommandContext(ctx, "yt-dlp", "--no-warnings", "-f", formatSpec, "-x", "--audio-format", "m4a", "-o", audioPath, "https://www.youtube.com/watch?v="+payload.VideoID)
+				if out, dlErr := cmd.CombinedOutput(); dlErr == nil {
+					if fi, statErr := os.Stat(audioPath); statErr == nil && fi.Size() > 10000 {
+						Logger.Info("YTDLP", token, "Successfully downloaded audio track with yt-dlp (Size: %.2f MB)", float64(fi.Size())/(1024*1024))
+						extracted.AudioURL = "local_ytdlp"
+						audioErr = nil
+					}
+				} else {
+					Logger.Warn("YTDLP", token, "yt-dlp fallback failed: %v, output: %s", dlErr, string(out))
+				}
 			}
-			UpdateProgress(payload, formatLabel, 90, mergeMsg)
-			mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
-			if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
-				_ = os.Remove(videoPath)
-				_ = os.Remove(audioPath)
-				downloadedFile = mergedPath
+		}
+
+		if (extracted.AudioURL != "" || audioPath != "") && audioErr == nil {
+			if _, statErr := os.Stat(audioPath); statErr == nil {
+				mergeMsg := "در حال ادغام فوق‌سریع صدا و تصویر"
+				if payload.PrefLang == "en" {
+					mergeMsg = "Fast merging video and audio tracks"
+				}
+				UpdateProgress(payload, formatLabel, 90, mergeMsg)
+				mergedPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
+				if err := MergeVideoAudio(videoPath, audioPath, mergedPath, token); err == nil {
+					_ = os.Remove(videoPath)
+					_ = os.Remove(audioPath)
+					downloadedFile = mergedPath
+				} else {
+					Logger.Warn("TASK", token, "FFmpeg merge failed, proceeding with raw video: %v", err)
+					downloadedFile = videoPath
+				}
 			} else {
-				Logger.Warn("TASK", token, "FFmpeg merge failed, proceeding with raw video: %v", err)
 				downloadedFile = videoPath
 			}
 		} else {
