@@ -141,18 +141,10 @@ func processTask(payload TaskPayload) {
 		var videoErr, audioErr error
 		var wgDL sync.WaitGroup
 
-		var vWritten, vTotal int64
-		var vSpeed float64
-		var vPercent int
-
 		wgDL.Add(1)
 		go func() {
 			defer wgDL.Done()
 			onVideoProgress := func(written, total int64, speedMBs float64, percent int) {
-				atomic.StoreInt64(&vWritten, written)
-				atomic.StoreInt64(&vTotal, total)
-				vSpeed = speedMBs
-				vPercent = percent
 				mappedPercent := 20 + int(float64(percent)*0.68)
 				stageMsg := "در حال دانلود پرسرعت موازی"
 				if payload.PrefLang == "en" {
