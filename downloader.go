@@ -227,12 +227,6 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", currentOffset, endByte))
 				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 				req.Header.Set("Accept", "*/*")
-				req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-				req.Header.Set("Referer", "https://www.youtube.com/")
-				req.Header.Set("Origin", "https://www.youtube.com")
-				req.Header.Set("Sec-Fetch-Dest", "video")
-				req.Header.Set("Sec-Fetch-Mode", "no-cors")
-				req.Header.Set("Sec-Fetch-Site", "cross-site")
 
 				resp, err := client.Do(req)
 				if err != nil {
@@ -384,8 +378,6 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Referer", "https://www.youtube.com/")
-		req.Header.Set("Origin", "https://www.youtube.com")
 
 		if currentWritten > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentWritten))
