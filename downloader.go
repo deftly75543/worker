@@ -124,7 +124,13 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 	return downloadSingleStream(ctx, streamURL, destPath, timeout, token, label, onProgress)
 }
 
-func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalSize int64, numThreads int, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
+type ChunkTask struct {
+	Index int
+	Start int64
+	End   int64
+}
+
+func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalSize int64, numWorkers int, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
 	startTime := time.Now()
 
 	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR, 0666)
@@ -138,21 +144,56 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 	}
 
 	var totalWritten int64
-	chunkSize := totalSize / int64(numThreads)
+
+	// پارتیشن‌بندی به چانک‌های ۶ مگابایتی برای دور زدن کامل لیمیت پهنای باند گوگل ویدیو
+	chunkSize := int64(6 * 1024 * 1024)
+	if totalSize < 12*1024*1024 {
+		chunkSize = int64(3 * 1024 * 1024)
+	}
+
+	var tasks []ChunkTask
+	var curStart int64
+	idx := 0
+	for curStart < totalSize {
+		curEnd := curStart + chunkSize - 1
+		if curEnd >= totalSize {
+			curEnd = totalSize - 1
+		}
+		tasks = append(tasks, ChunkTask{
+			Index: idx,
+			Start: curStart,
+			End:   curEnd,
+		})
+		idx++
+		curStart = curEnd + 1
+	}
+
+	taskChan := make(chan ChunkTask, len(tasks))
+	for _, t := range tasks {
+		taskChan <- t
+	}
+	close(taskChan)
+
+	if numWorkers <= 0 {
+		numWorkers = 12
+	}
+	if numWorkers > len(tasks) {
+		numWorkers = len(tasks)
+	}
 
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   8 * time.Second,
+			Timeout:   6 * time.Second,
 			KeepAlive: 90 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          numThreads * 6,
-		MaxIdleConnsPerHost:   numThreads * 4,
-		MaxConnsPerHost:       numThreads * 4,
+		MaxIdleConns:          numWorkers * 6,
+		MaxIdleConnsPerHost:   numWorkers * 4,
+		MaxConnsPerHost:       numWorkers * 4,
 		IdleConnTimeout:       120 * time.Second,
-		TLSHandshakeTimeout:   8 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
+		TLSHandshakeTimeout:   6 * time.Second,
+		ResponseHeaderTimeout: 12 * time.Second,
 		DisableCompression:   true,
 		ReadBufferSize:        1024 * 1024,
 		WriteBufferSize:       1024 * 1024,
@@ -165,11 +206,11 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 	stopMonitor := make(chan struct{})
 	var wg sync.WaitGroup
-	errChan := make(chan error, numThreads)
+	errChan := make(chan error, numWorkers)
 
 	// مانیتورینگ زنده و گزارش پیشرفت تجمیعی تمام کانال‌ها به تلگرام
 	go func() {
-		ticker := time.NewTicker(3500 * time.Millisecond)
+		ticker := time.NewTicker(2500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -195,112 +236,115 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 		}
 	}()
 
-	for i := 0; i < numThreads; i++ {
-		start := int64(i) * chunkSize
-		end := start + chunkSize - 1
-		if i == numThreads-1 {
-			end = totalSize - 1
-		}
+	userAgents := []string{
+		"com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+		"com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 17_4 like Mac OS X; en_US)",
+		"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+	}
 
+	for workerID := 0; workerID < numWorkers; workerID++ {
 		wg.Add(1)
-		go func(threadID int, startByte, endByte int64) {
+		go func(wid int) {
 			defer wg.Done()
 
-			currentOffset := startByte
-			var chunkErr error
+			bufPtr := chunkBufferPool.Get().(*[]byte)
+			buf := *bufPtr
+			defer chunkBufferPool.Put(bufPtr)
 
-			for retry := 0; retry < 5; retry++ {
+			for task := range taskChan {
 				if ctx.Err() != nil {
 					return
 				}
-				if currentOffset > endByte {
-					return
-				}
 
-				reqCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-				req, err := http.NewRequestWithContext(reqCtx, "GET", streamURL, nil)
-				if err != nil {
-					cancel()
-					chunkErr = err
-					continue
-				}
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", currentOffset, endByte))
-				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-				req.Header.Set("Accept", "*/*")
+				taskDone := false
+				var lastTaskErr error
 
-				resp, err := client.Do(req)
-				if err != nil {
-					cancel()
-					chunkErr = err
+				for attempt := 1; attempt <= 5; attempt++ {
 					if ctx.Err() != nil {
 						return
 					}
-					time.Sleep(500 * time.Millisecond)
-					continue
-				}
 
-				if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-					resp.Body.Close()
-					cancel()
-					chunkErr = fmt.Errorf("bad chunk status: %s", resp.Status)
-					time.Sleep(500 * time.Millisecond)
-					continue
-				}
+					reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+					req, err := http.NewRequestWithContext(reqCtx, "GET", streamURL, nil)
+					if err != nil {
+						cancel()
+						lastTaskErr = err
+						continue
+					}
 
-				bufPtr := chunkBufferPool.Get().(*[]byte)
-				buf := *bufPtr
+					req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", task.Start, task.End))
+					req.Header.Set("User-Agent", userAgents[(wid+attempt)%len(userAgents)])
+					req.Header.Set("Accept", "*/*")
 
-				for {
-					if ctx.Err() != nil {
+					resp, err := client.Do(req)
+					if err != nil {
+						cancel()
+						lastTaskErr = err
+						time.Sleep(time.Duration(attempt*200) * time.Millisecond)
+						continue
+					}
+
+					if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 						resp.Body.Close()
 						cancel()
-						chunkBufferPool.Put(bufPtr)
-						return
+						lastTaskErr = fmt.Errorf("bad status %s for chunk %d", resp.Status, task.Index)
+						time.Sleep(time.Duration(attempt*200) * time.Millisecond)
+						continue
 					}
-					n, rErr := resp.Body.Read(buf)
-					if n > 0 {
-						if _, wErr := file.WriteAt(buf[:n], currentOffset); wErr != nil {
+
+					curOffset := task.Start
+					chunkReadSuccess := true
+
+					for {
+						if ctx.Err() != nil {
 							resp.Body.Close()
 							cancel()
-							chunkErr = wErr
+							return
+						}
+						n, rErr := resp.Body.Read(buf)
+						if n > 0 {
+							if _, wErr := file.WriteAt(buf[:n], curOffset); wErr != nil {
+								resp.Body.Close()
+								cancel()
+								lastTaskErr = wErr
+								chunkReadSuccess = false
+								break
+							}
+							curOffset += int64(n)
+							atomic.AddInt64(&totalWritten, int64(n))
+						}
+						if rErr != nil {
+							if rErr != io.EOF {
+								lastTaskErr = rErr
+								chunkReadSuccess = false
+							}
 							break
 						}
-						currentOffset += int64(n)
-						atomic.AddInt64(&totalWritten, int64(n))
 					}
-					if rErr != nil {
-						if rErr == io.EOF {
-							chunkErr = nil
-						} else {
-							chunkErr = rErr
-						}
+					resp.Body.Close()
+					cancel()
+
+					if chunkReadSuccess {
+						taskDone = true
 						break
 					}
+					time.Sleep(time.Duration(attempt*200) * time.Millisecond)
 				}
-				resp.Body.Close()
-				cancel()
-				chunkBufferPool.Put(bufPtr)
 
-				if chunkErr == nil && currentOffset > endByte {
+				if !taskDone {
+					select {
+					case errChan <- fmt.Errorf("chunk #%d (%d-%d) failed: %v", task.Index, task.Start, task.End, lastTaskErr):
+					default:
+					}
 					return
 				}
-				Logger.Warn("DOWNLOADER", token, "Chunk #%d interrupted at offset %d/%d (retry %d/5): %v",
-					threadID+1, currentOffset, endByte, retry+1, chunkErr)
-				time.Sleep(500 * time.Millisecond)
 			}
-
-			if chunkErr != nil && ctx.Err() == nil {
-				errChan <- fmt.Errorf("chunk %d failed: %w", threadID, chunkErr)
-			}
-		}(i, start, end)
+		}(workerID)
 	}
 
 	wg.Wait()
 	close(stopMonitor)
-
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
 
 	select {
 	case err := <-errChan:
@@ -308,15 +352,14 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 	default:
 	}
 
-	elapsed := time.Since(startTime)
-	mbWritten := float64(atomic.LoadInt64(&totalWritten)) / (1024 * 1024)
-	speedMBs := mbWritten / elapsed.Seconds()
-	Logger.Info("DOWNLOADER", token, "🚀 Turbo Download COMPLETED for %s: %.2f MB in %v (Aggregated Speed: %.2f MB/s)",
-		label, mbWritten, elapsed.Round(time.Millisecond), speedMBs)
-
-	if onProgress != nil {
-		onProgress(totalSize, totalSize, speedMBs, 100)
+	if atomic.LoadInt64(&totalWritten) < totalSize {
+		return fmt.Errorf("download incomplete: received %d of %d bytes", atomic.LoadInt64(&totalWritten), totalSize)
 	}
+
+	elapsed := time.Since(startTime)
+	avgSpeed := (float64(totalSize) / (1024 * 1024)) / elapsed.Seconds()
+	Logger.Info("DOWNLOADER", token, "Turbo Multi-Chunk Download COMPLETED: %.2f MB in %v (Avg Speed: %.2f MB/s)",
+		float64(totalSize)/(1024*1024), elapsed.Round(time.Millisecond), avgSpeed)
 	return nil
 }
 

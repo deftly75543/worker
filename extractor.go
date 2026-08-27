@@ -483,17 +483,7 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		return yt138Media, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "RapidAPI providers rate-limited (HTTP 429). Activating Fail-Safe YouTube Innertube Engine...")
-	innerMedia, innerErr := ExtractDirectFromInnertube(videoID, quality, audioLang, token)
-	if innerErr == nil && innerMedia != nil {
-		return innerMedia, nil
-	}
 
-	Logger.Warn("EXTRACTOR", token, "Innertube failed (%v). Trying native yt-dlp extractor fallback...", innerErr)
-	ytdlMedia, ytdlErr := ExtractFromYtDlp(videoID, quality, audioLang, token)
-	if ytdlErr == nil && ytdlMedia != nil {
-		return ytdlMedia, nil
-	}
 
 	if lastErr != nil {
 		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and fallbacks exhausted. Last error: %v", lastErr)

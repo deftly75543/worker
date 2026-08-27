@@ -126,25 +126,18 @@ func processTask(payload TaskPayload) {
 				Logger.Info("TASK", token, "Audio download cancelled by user")
 				return
 			}
-			Logger.Warn("TASK", token, "Audio stream download failed (%v). Activating direct Yt-Dlp fallback...", err)
-			ytdlErr := DownloadWithYtDlp(ctx, payload.VideoURL, "audio", payload.AudioLang, audioPath, token, func(percent int, speedMBs float64) {
-				mappedPercent := 20 + int(float64(percent)*0.70)
-				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, 0, 0, speedMBs, "در حال دانلود مستقیم فایل صوتی")
-			})
-			if ytdlErr != nil {
-				Logger.Error("TASK", token, "All audio download methods failed: %v", ytdlErr)
-				UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل صوتی: "+ytdlErr.Error(), token)
-				if payload.MasterCallbackURL != "" {
-					SendMasterCallback(payload.MasterCallbackURL, map[string]any{
-						"action":            "error",
-						"secret":            payload.Secret,
-						"chat_id":           FormatChatID(payload.ChatID),
-						"status_message_id": payload.StatusMessageID,
-						"error":             ytdlErr.Error(),
-					}, token)
-				}
-				return
+			Logger.Error("TASK", token, "Audio stream download failed: %v", err)
+			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل صوتی: "+err.Error(), token)
+			if payload.MasterCallbackURL != "" {
+				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
+					"action":            "error",
+					"secret":            payload.Secret,
+					"chat_id":           FormatChatID(payload.ChatID),
+					"status_message_id": payload.StatusMessageID,
+					"error":             err.Error(),
+				}, token)
 			}
+			return
 		}
 		downloadedFile = audioPath
 	} else {
@@ -183,28 +176,18 @@ func processTask(payload TaskPayload) {
 				Logger.Info("TASK", token, "Video download cancelled by user")
 				return
 			}
-			Logger.Warn("TASK", token, "Video stream download failed (%v). Activating direct Yt-Dlp fallback...", videoErr)
-			ytdlPath := filepath.Join(downloadDir, fmt.Sprintf("%s.mp4", cleanToken))
-			ytdlErr := DownloadWithYtDlp(ctx, payload.VideoURL, payload.Quality, payload.AudioLang, ytdlPath, token, func(percent int, speedMBs float64) {
-				mappedPercent := 20 + int(float64(percent)*0.70)
-				UpdateLiveDownloadProgress(payload, formatLabel, mappedPercent, 0, 0, speedMBs, "در حال دانلود پرسرعت مستقیم")
-			})
-			if ytdlErr == nil {
-				downloadedFile = ytdlPath
-			} else {
-				Logger.Error("TASK", token, "All video download methods failed: %v", ytdlErr)
-				UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+ytdlErr.Error(), token)
-				if payload.MasterCallbackURL != "" {
-					SendMasterCallback(payload.MasterCallbackURL, map[string]any{
-						"action":            "error",
-						"secret":            payload.Secret,
-						"chat_id":           FormatChatID(payload.ChatID),
-						"status_message_id": payload.StatusMessageID,
-						"error":             ytdlErr.Error(),
-					}, token)
-				}
-				return
+			Logger.Error("TASK", token, "Video stream download failed: %v", videoErr)
+			UpdateTelegramMessage(payload.BotToken, payload.ChatID, payload.StatusMessageID, "❌ خطا در دانلود فایل ویدیو: "+videoErr.Error(), token)
+			if payload.MasterCallbackURL != "" {
+				SendMasterCallback(payload.MasterCallbackURL, map[string]any{
+					"action":            "error",
+					"secret":            payload.Secret,
+					"chat_id":           FormatChatID(payload.ChatID),
+					"status_message_id": payload.StatusMessageID,
+					"error":             videoErr.Error(),
+				}, token)
 			}
+			return
 		}
 
 		if (extracted.AudioURL == "" || audioErr != nil) && (payload.AudioLang == "fa" || payload.AudioLang == "orig" || payload.AudioLang == "default") {
