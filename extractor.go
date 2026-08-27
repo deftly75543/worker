@@ -226,36 +226,27 @@ func selectBestAudioStream(audios []RapidAPIAudioItem, targetLang, token string)
 		Logger.Warn("EXTRACTOR", token, "Requested audio track [%s] not explicitly found among tracks, falling back to smart prioritization", targetLang)
 	}
 
-	// ۲. استراتژی هوشمند (Smart Priority):
-	// اولویت اول: زبان فارسی اگر موجود باشد
-	for _, item := range audios {
-		code, name, _ := getAudioLang(item)
-		if code == "fa" || strings.Contains(strings.ToLower(name), "persian") || strings.Contains(strings.ToLower(name), "farsi") || strings.Contains(name, "فارسی") {
-			Logger.Info("EXTRACTOR", token, "Smart Priority Selected Persian Audio: %s (%s)", name, item.Quality)
-			return item.URL, name
-		}
-	}
-
-	// اولویت دوم: زبان اصلی ویدیو (Original Track)
+	// ۲. استخراج صوت طبیعی و اصلی خود ویدیو (Original Native Audio):
+	// اولویت اول: زبان و صوت اصلی خود ویدیو (Original Track)
 	for _, item := range audios {
 		_, name, isOrig := getAudioLang(item)
 		if isOrig || item.IsOriginal || item.AudioTrack.AudioIsDefault || strings.Contains(strings.ToLower(name), "original") || strings.Contains(name, "اصلی") {
-			Logger.Info("EXTRACTOR", token, "Smart Priority Selected Original Audio: %s (%s)", name, item.Quality)
+			Logger.Info("EXTRACTOR", token, "Selected Original Native Audio Track: %s (%s)", name, item.Quality)
 			return item.URL, name
 		}
 	}
 
-	// اولویت سوم: ترک پیش‌فرض یا بالاترین کیفیت
+	// اولویت دوم: ترک پیش‌فرض یا بالاترین کیفیت
 	for _, item := range audios {
 		if item.IsDefault || item.AudioTrack.AudioIsDefault {
 			_, name, _ := getAudioLang(item)
-			Logger.Info("EXTRACTOR", token, "Auto-Selected Default Audio Track: %s (%s)", name, item.Quality)
+			Logger.Info("EXTRACTOR", token, "Selected Default Audio Track: %s (%s)", name, item.Quality)
 			return item.URL, name
 		}
 	}
 
 	_, name, _ := getAudioLang(audios[0])
-	Logger.Info("EXTRACTOR", token, "Auto-Selected Standard Audio Track: %s (%s)", name, audios[0].Quality)
+	Logger.Info("EXTRACTOR", token, "Selected Standard Audio Track: %s (%s)", name, audios[0].Quality)
 	return audios[0].URL, name
 }
 
@@ -339,8 +330,8 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		// انتخاب هوشمند ترک صوتی بر اساس درخواست کاربر یا اولویت فارسی/اصلی
 		bestAudioURL, selectedLangName := selectBestAudioStream(allAudios, audioLang, token)
 
-		// اگر زبان فارسی یا ترک خاصی خواسته شده و از RapidAPI دریافت نشد، مستقیماً از Innertube یوتیوب استعلام می‌کنیم
-		if (audioLang == "fa" && (bestAudioURL == "" || !strings.Contains(selectedLangName, "فارسی"))) || bestAudioURL == "" {
+		// اگر ترکی از وب‌سرویس دریافت نشد، به عنوان آخرین راهکار از اینرتیوب استعلام می‌کنیم
+		if bestAudioURL == "" {
 			inURL, inName, inErr := ExtractFromInnertube(videoID, audioLang, token)
 			if inErr == nil && inURL != "" {
 				bestAudioURL = inURL
