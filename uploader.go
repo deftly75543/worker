@@ -284,7 +284,7 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 
 	// بررسی سرور محلی تلگرام (پورت 8081 برای آپلودهای تا ۲ گیگابایت)
 	apiBase := "http://127.0.0.1:8081"
-	testClient := &http.Client{Timeout: 500 * time.Millisecond}
+	testClient := &http.Client{Timeout: 3 * time.Second}
 	resp, testErr := testClient.Get(apiBase)
 	isLocal := false
 	if testErr == nil && resp != nil && resp.StatusCode < 500 {

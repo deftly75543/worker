@@ -21,11 +21,10 @@ telegram-bot-api \
     --api-hash="${TG_API_HASH}" \
     --local \
     --http-port=8081 \
-    --threads=8 \
     --max-connections=1000 \
     --dir=/app/storage/tgdata \
     --temp-dir=/app/storage/tgdata/temp &
-sleep 1
+sleep 2
 
 # ۲. پروسه پاکسازی فایل‌های موقت در پس‌زمینه
 (
