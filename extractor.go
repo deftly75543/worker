@@ -26,10 +26,12 @@ type ExtractedMedia struct {
 }
 
 type RapidAPIVideoItem struct {
-	Quality  string `json:"quality"`
-	FPS      any    `json:"fps"`
-	URL      string `json:"url"`
-	HasAudio bool   `json:"hasAudio"`
+	Quality     string `json:"quality"`
+	FPS         any    `json:"fps"`
+	URL         string `json:"url"`
+	Link        string `json:"link"`
+	DownloadURL string `json:"downloadUrl"`
+	HasAudio    bool   `json:"hasAudio"`
 }
 
 type RapidAPIAudioItem struct {
