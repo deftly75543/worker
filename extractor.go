@@ -385,6 +385,16 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		var selectedQuality string
 		var selectedFPS any
 
+		for i := range data.Videos.Items {
+			if data.Videos.Items[i].URL == "" {
+				if data.Videos.Items[i].Link != "" {
+					data.Videos.Items[i].URL = data.Videos.Items[i].Link
+				} else if data.Videos.Items[i].DownloadURL != "" {
+					data.Videos.Items[i].URL = data.Videos.Items[i].DownloadURL
+				}
+			}
+		}
+
 		for _, v := range data.Videos.Items {
 			if v.URL == "" {
 				continue

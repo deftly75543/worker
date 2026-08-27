@@ -428,8 +428,8 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 		req.Header.Set("User-Agent", userAgents[(attempt-1)%len(userAgents)])
 		req.Header.Set("Accept", "*/*")
 
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentWritten))
 		if currentWritten > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentWritten))
 			if _, seekErr := out.Seek(currentWritten, io.SeekStart); seekErr != nil {
 				Logger.Warn("DOWNLOADER", token, "Seek error: %v", seekErr)
 			}
