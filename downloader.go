@@ -99,12 +99,14 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 		}
 	}
 
-	// تنظیم مقیاس‌پذیر و ضد محدودیت (Anti-Throttling Concurrency)
-	// استفاده از حداکثر ۴ تا ۶ استریم همزمان جهت جلوگیری از فعال شدن فایروال Sabre و محدودیت سرعت یوتیوب
-	if contentLength > 15*1024*1024 && acceptRanges {
-		numThreads := 4
-		if contentLength > 60*1024*1024 {
-			numThreads = 6
+	// تنظیم مالتی‌ترد پرسرعت توربو (Turbo Multi-Threading 8-16 parallel streams)
+	if contentLength > 5*1024*1024 && acceptRanges {
+		numThreads := 8
+		if contentLength > 30*1024*1024 {
+			numThreads = 12
+		}
+		if contentLength > 100*1024*1024 {
+			numThreads = 16
 		}
 		Logger.Info("DOWNLOADER", token, "Turbo Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
 			numThreads, float64(contentLength)/(1024*1024))
@@ -225,8 +227,12 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", currentOffset, endByte))
 				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 				req.Header.Set("Accept", "*/*")
+				req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 				req.Header.Set("Referer", "https://www.youtube.com/")
 				req.Header.Set("Origin", "https://www.youtube.com")
+				req.Header.Set("Sec-Fetch-Dest", "video")
+				req.Header.Set("Sec-Fetch-Mode", "no-cors")
+				req.Header.Set("Sec-Fetch-Site", "cross-site")
 
 				resp, err := client.Do(req)
 				if err != nil {
