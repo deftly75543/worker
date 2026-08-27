@@ -376,7 +376,13 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 			cancel()
 			return err
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+		userAgents := []string{
+			"com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+			"com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 17_4 like Mac OS X; en_US)",
+			"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+		}
+		req.Header.Set("User-Agent", userAgents[(attempt-1)%len(userAgents)])
 		req.Header.Set("Accept", "*/*")
 
 		if currentWritten > 0 {
@@ -694,5 +700,39 @@ func BurnSubtitle(videoPath, audioPath, subPath, outputPath, token string) error
 
 	Logger.Info("FFMPEG", token, "Hardcoded subtitles burned successfully in %v -> %s", elapsed.Round(time.Millisecond), outputPath)
 	return nil
+}
+
+func DownloadWithYtDlp(ctx context.Context, videoURL, quality, audioLang, destPath, token string, onProgress func(percent int, speedMBs float64)) error {
+	Logger.Info("DOWNLOADER", token, "Starting direct resilient Yt-Dlp download for %s -> %s", quality, destPath)
+
+	formatSelector := fmt.Sprintf("best[height<=%s]/bestvideo[height<=%s]+bestaudio/best", quality, quality)
+	if quality == "audio" || quality == "mp3" || quality == "m4a" {
+		formatSelector = "bestaudio/best"
+	}
+
+	cmd := exec.CommandContext(ctx, "yt-dlp",
+		"--no-warnings",
+		"--no-check-certificates",
+		"--extractor-args", "youtube:player_client=android,ios,web",
+		"-f", formatSelector,
+		"-o", destPath,
+		videoURL,
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		Logger.Warn("DOWNLOADER", token, "yt-dlp with android client failed (%v), trying standard fallback mode: %s", err, string(out))
+		cmdFallback := exec.CommandContext(ctx, "yt-dlp", "--no-warnings", "-f", formatSelector, "-o", destPath, videoURL)
+		if fOut, fErr := cmdFallback.CombinedOutput(); fErr != nil {
+			return fmt.Errorf("yt-dlp error: %w | %s", fErr, string(fOut))
+		}
+	}
+
+	if fi, err := os.Stat(destPath); err == nil && fi.Size() > 1024 {
+		Logger.Info("DOWNLOADER", token, "yt-dlp direct download SUCCESS: %.2f MB", float64(fi.Size())/(1024*1024))
+		return nil
+	}
+
+	return fmt.Errorf("downloaded file not found or empty")
 }
 
