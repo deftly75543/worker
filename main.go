@@ -293,6 +293,36 @@ func processTask(payload TaskPayload) {
 		}
 	}
 
+	// ۷. چسباندن زیرنویس به تصویر ویدیو (Hardcoded Subtitles Burner)
+	if payload.SendFormat == "hardsub" || strings.HasPrefix(payload.Quality, "hardsub") {
+		subLang := payload.AudioLang
+		if subLang == "" || subLang == "default" || subLang == "orig" {
+			subLang = "fa"
+		}
+		
+		// دانلود زیرنویس و تبدیل خودکار به SRT
+		cmdSub := exec.Command("yt-dlp", "--no-warnings", "--write-subs", "--write-auto-subs", "--sub-lang", subLang+",en", "--convert-subs", "srt", "--skip-download", "-o", filepath.Join(downloadDir, cleanToken), "https://www.youtube.com/watch?v="+payload.VideoID)
+		_ = cmdSub.Run()
+
+		foundSub := ""
+		matches, _ := filepath.Glob(filepath.Join(downloadDir, fmt.Sprintf("%s*.srt", cleanToken)))
+		if len(matches) > 0 {
+			foundSub = matches[0]
+		}
+
+		if foundSub != "" {
+			hardsubPath := filepath.Join(downloadDir, fmt.Sprintf("%s_hardsub.mp4", cleanToken))
+			burnMsg := "در حال چسباندن زیرنویس فارسی به تصویر ویدیو"
+			if payload.PrefLang == "en" {
+				burnMsg = "Burning hardcoded subtitles into video"
+			}
+			UpdateProgress(payload, formatLabel, 93, burnMsg)
+			if err := BurnSubtitle(downloadedFile, "", foundSub, hardsubPath, token); err == nil {
+				downloadedFile = hardsubPath
+			}
+		}
+	}
+
 	fileID, err := UploadToTelegram(payload, downloadedFile, thumbPath, formatLabel, extracted.Title, extracted.Type == "audio")
 	if err != nil {
 		Logger.Error("TASK", token, "Upload to Telegram FAILED: %v", err)

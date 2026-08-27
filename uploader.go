@@ -20,15 +20,15 @@ import (
 var uploadTransport = &http.Transport{
 	Proxy: http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 60 * time.Second,
+		Timeout:   8 * time.Second,
+		KeepAlive: 90 * time.Second,
 	}).DialContext,
 	ForceAttemptHTTP2:   true,
-	MaxIdleConns:        500,
-	MaxIdleConnsPerHost: 100,
+	MaxIdleConns:        1000,
+	MaxIdleConnsPerHost: 200,
 	IdleConnTimeout:     120 * time.Second,
 	TLSHandshakeTimeout: 8 * time.Second,
-	ReadBufferSize:      512 * 1024,
+	ReadBufferSize:      1024 * 1024,
 	WriteBufferSize:     1024 * 1024,
 }
 
@@ -56,6 +56,7 @@ type TaskPayload struct {
 	MasterCallbackURL string `json:"master_callback_url"`
 	Secret            string `json:"secret"`
 	RapidAPIKeys      string `json:"rapidapi_keys"`
+	StorageChannel    string `json:"storage_channel"`
 }
 
 var (
@@ -381,7 +382,7 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 
 			// File stream
 			if part, pErr := mpWriter.CreateFormFile(field, filepath.Base(filePath)); pErr == nil {
-				buf := make([]byte, 64*1024)
+				buf := make([]byte, 512*1024)
 				_, _ = io.CopyBuffer(part, file, buf)
 			}
 			_ = mpWriter.Close()
@@ -448,6 +449,30 @@ func UploadToTelegram(payload TaskPayload, filePath, thumbPath, formatLabel, tit
 		speedMBs := sizeMB / uploadElapsed.Seconds()
 		Logger.Info("UPLOADER", token, "Upload SUCCESS in %v (avg: %.2f MB/s). FileID: %s",
 			uploadElapsed.Round(time.Millisecond), speedMBs, fileID)
+
+		// اگر کانال دیتاسنتر تنظیم شده، یک نسخه از فایل را در کانال برای فوروارد آنی کش می‌کنیم
+		if payload.StorageChannel != "" && fileID != "" {
+			go func(botToken, stCh, fID, fType, capText string) {
+				m := "sendVideo"
+				fName := "video"
+				if fType == "audio" {
+					m = "sendAudio"
+					fName = "audio"
+				} else if fType == "document" {
+					m = "sendDocument"
+					fName = "document"
+				}
+				u := fmt.Sprintf("https://api.telegram.org/bot%s/%s", botToken, m)
+				data := url.Values{}
+				data.Set("chat_id", stCh)
+				data.Set(fName, fID)
+				data.Set("caption", capText)
+				data.Set("parse_mode", "HTML")
+				c := &http.Client{Timeout: 10 * time.Second}
+				_, _ = c.PostForm(u, data)
+			}(payload.BotToken, payload.StorageChannel, fileID, field, caption)
+		}
+
 		return fileID, nil
 	}
 

@@ -18,7 +18,7 @@ import (
 
 var chunkBufferPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 512*1024)
+		b := make([]byte, 1024*1024)
 		return &b
 	},
 }
@@ -99,15 +99,14 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 		}
 	}
 
-	// تنظیم مقیاس‌پذیر و پایدار تعداد کانکشن‌های موازی جهت دستیابی به حداکثر سرعت شبکه (۳۰ الی ۵۰+ مگابایت بر ثانیه)
-	if contentLength > 4*1024*1024 && acceptRanges {
-		numThreads := 12
-		if contentLength > 50*1024*1024 {
-			numThreads = 32
-		} else if contentLength > 15*1024*1024 {
-			numThreads = 20
+	// تنظیم مقیاس‌پذیر و ضد محدودیت (Anti-Throttling Concurrency)
+	// استفاده از حداکثر ۴ تا ۶ استریم همزمان جهت جلوگیری از فعال شدن فایروال Sabre و محدودیت سرعت یوتیوب
+	if contentLength > 15*1024*1024 && acceptRanges {
+		numThreads := 4
+		if contentLength > 60*1024*1024 {
+			numThreads = 6
 		}
-		Logger.Info("DOWNLOADER", token, "Turbo Extreme Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
+		Logger.Info("DOWNLOADER", token, "Turbo Multi-Thread Mode ENABLED: %d parallel streams for %.2f MB",
 			numThreads, float64(contentLength)/(1024*1024))
 
 		err := downloadMultiThread(ctx, streamURL, destPath, contentLength, numThreads, timeout, token, label, onProgress)
@@ -117,7 +116,7 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		Logger.Warn("DOWNLOADER", token, "Multi-thread download failed (%v), falling back to single stream", err)
+		Logger.Warn("DOWNLOADER", token, "Multi-thread download interrupted (%v), switching to auto-resuming stream", err)
 	}
 
 	return downloadSingleStream(ctx, streamURL, destPath, timeout, token, label, onProgress)
@@ -126,7 +125,7 @@ func DownloadStream(ctx context.Context, streamURL, destPath string, timeout tim
 func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalSize int64, numThreads int, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
 	startTime := time.Now()
 
-	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
+	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return err
 	}
@@ -143,24 +142,23 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   8 * time.Second,
-			KeepAlive: 60 * time.Second,
+			KeepAlive: 90 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          numThreads * 4,
-		MaxIdleConnsPerHost:   numThreads * 2,
-		MaxConnsPerHost:       numThreads * 2,
-		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          numThreads * 6,
+		MaxIdleConnsPerHost:   numThreads * 4,
+		MaxConnsPerHost:       numThreads * 4,
+		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   8 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
 		DisableCompression:   true,
-		ReadBufferSize:        512 * 1024,
-		WriteBufferSize:       512 * 1024,
+		ReadBufferSize:        1024 * 1024,
+		WriteBufferSize:       1024 * 1024,
 	}
 	defer transport.CloseIdleConnections()
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
 	}
 
 	stopMonitor := make(chan struct{})
@@ -169,7 +167,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 	// مانیتورینگ زنده و گزارش پیشرفت تجمیعی تمام کانال‌ها به تلگرام
 	go func() {
-		ticker := time.NewTicker(2500 * time.Millisecond)
+		ticker := time.NewTicker(3500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -206,21 +204,33 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 		go func(threadID int, startByte, endByte int64) {
 			defer wg.Done()
 
+			currentOffset := startByte
 			var chunkErr error
-			for retry := 0; retry < 3; retry++ {
+
+			for retry := 0; retry < 5; retry++ {
 				if ctx.Err() != nil {
 					return
 				}
-				req, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
+				if currentOffset > endByte {
+					return
+				}
+
+				reqCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+				req, err := http.NewRequestWithContext(reqCtx, "GET", streamURL, nil)
 				if err != nil {
+					cancel()
 					chunkErr = err
 					continue
 				}
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", startByte, endByte))
-				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36")
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", currentOffset, endByte))
+				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+				req.Header.Set("Accept", "*/*")
+				req.Header.Set("Referer", "https://www.youtube.com/")
+				req.Header.Set("Origin", "https://www.youtube.com")
 
 				resp, err := client.Do(req)
 				if err != nil {
+					cancel()
 					chunkErr = err
 					if ctx.Err() != nil {
 						return
@@ -231,6 +241,7 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 				if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 					resp.Body.Close()
+					cancel()
 					chunkErr = fmt.Errorf("bad chunk status: %s", resp.Status)
 					time.Sleep(500 * time.Millisecond)
 					continue
@@ -238,23 +249,23 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 				bufPtr := chunkBufferPool.Get().(*[]byte)
 				buf := *bufPtr
-				currentOffset := startByte
-				var threadWrittenThisAttempt int64
 
 				for {
 					if ctx.Err() != nil {
 						resp.Body.Close()
+						cancel()
+						chunkBufferPool.Put(bufPtr)
 						return
 					}
 					n, rErr := resp.Body.Read(buf)
 					if n > 0 {
 						if _, wErr := file.WriteAt(buf[:n], currentOffset); wErr != nil {
 							resp.Body.Close()
+							cancel()
 							chunkErr = wErr
 							break
 						}
 						currentOffset += int64(n)
-						threadWrittenThisAttempt += int64(n)
 						atomic.AddInt64(&totalWritten, int64(n))
 					}
 					if rErr != nil {
@@ -267,13 +278,15 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 					}
 				}
 				resp.Body.Close()
+				cancel()
 				chunkBufferPool.Put(bufPtr)
 
-				if chunkErr == nil {
+				if chunkErr == nil && currentOffset > endByte {
 					return
 				}
-				atomic.AddInt64(&totalWritten, -threadWrittenThisAttempt)
-				Logger.Warn("DOWNLOADER", token, "Chunk #%d retry %d/3 due to: %v", threadID+1, retry+1, chunkErr)
+				Logger.Warn("DOWNLOADER", token, "Chunk #%d interrupted at offset %d/%d (retry %d/5): %v",
+					threadID+1, currentOffset, endByte, retry+1, chunkErr)
+				time.Sleep(500 * time.Millisecond)
 			}
 
 			if chunkErr != nil && ctx.Err() == nil {
@@ -309,14 +322,21 @@ func downloadMultiThread(ctx context.Context, streamURL, destPath string, totalS
 
 func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeout time.Duration, token, label string, onProgress func(written, total int64, speedMBs float64, percent int)) error {
 	startTime := time.Now()
-	Logger.Info("DOWNLOADER", token, "Starting single stream download of %s -> %s", label, destPath)
+	Logger.Info("DOWNLOADER", token, "Starting resilient stream download of %s -> %s", label, destPath)
 
-	out, err := os.Create(destPath)
+	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
-		Logger.Error("DOWNLOADER", token, "Failed to create destination file %s: %v", destPath, err)
+		Logger.Error("DOWNLOADER", token, "Failed to open destination file %s: %v", destPath, err)
 		return err
 	}
 	defer out.Close()
+
+	var totalSize int64 = 0
+	var currentWritten int64 = 0
+
+	if fi, statErr := out.Stat(); statErr == nil {
+		currentWritten = fi.Size()
+	}
 
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -324,72 +344,128 @@ func downloadSingleStream(ctx context.Context, streamURL, destPath string, timeo
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:   true,
-		DisableCompression:  true,
-		ReadBufferSize:      128 * 1024,
-		WriteBufferSize:     128 * 1024,
+		ForceAttemptHTTP2:     true,
+		DisableCompression:    true,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ReadBufferSize:        256 * 1024,
+		WriteBufferSize:       256 * 1024,
 	}
 	defer transport.CloseIdleConnections()
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
-	if err != nil {
-		Logger.Error("DOWNLOADER", token, "Failed to build HTTP request for %s: %v", label, err)
-		return err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		Logger.Error("DOWNLOADER", token, "HTTP request failed for %s after %v: %v", label, time.Since(startTime), err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		Logger.Error("DOWNLOADER", token, "Download %s received HTTP %d status: %s", label, resp.StatusCode, resp.Status)
-		return fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	contentLength := resp.ContentLength
-	if contentLength > 0 {
-		Logger.Info("DOWNLOADER", token, "%s Content-Length: %.2f MB", label, float64(contentLength)/(1024*1024))
-	} else {
-		Logger.Info("DOWNLOADER", token, "%s stream is chunked / dynamic size", label)
 	}
 
 	tracker := &ProgressTracker{
-		Total:      contentLength,
+		Total:      totalSize,
+		Written:    currentWritten,
 		StartTime:  startTime,
 		LastUpdate: time.Now(),
 		OnProgress: onProgress,
 	}
 
-	buf := make([]byte, 128*1024)
-	written, err := io.CopyBuffer(io.MultiWriter(out, tracker), resp.Body, buf)
-	elapsed := time.Since(startTime)
-	if err != nil {
+	maxRetries := 6
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		Logger.Error("DOWNLOADER", token, "Error while streaming %s after %v (written %.2f MB): %v",
-			label, elapsed, float64(written)/(1024*1024), err)
-		return err
+
+		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", streamURL, nil)
+		if err != nil {
+			cancel()
+			return err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Referer", "https://www.youtube.com/")
+		req.Header.Set("Origin", "https://www.youtube.com")
+
+		if currentWritten > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentWritten))
+			if _, seekErr := out.Seek(currentWritten, io.SeekStart); seekErr != nil {
+				Logger.Warn("DOWNLOADER", token, "Seek error: %v", seekErr)
+			}
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			Logger.Warn("DOWNLOADER", token, "Attempt %d/%d connection error: %v, retrying in 1s...", attempt, maxRetries, err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			cancel()
+			if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && currentWritten > 0 {
+				// File download completed
+				return nil
+			}
+			Logger.Warn("DOWNLOADER", token, "Attempt %d/%d received status: %s", attempt, maxRetries, resp.Status)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if totalSize <= 0 {
+			if resp.ContentLength > 0 {
+				totalSize = currentWritten + resp.ContentLength
+				tracker.Total = totalSize
+			}
+		}
+
+		buf := make([]byte, 256*1024)
+		var streamErr error
+
+		for {
+			if ctx.Err() != nil {
+				resp.Body.Close()
+				cancel()
+				return ctx.Err()
+			}
+			n, rErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, wErr := out.Write(buf[:n]); wErr != nil {
+					streamErr = wErr
+					break
+				}
+				currentWritten += int64(n)
+				_, _ = tracker.Write(buf[:n])
+			}
+			if rErr != nil {
+				if rErr == io.EOF {
+					streamErr = nil
+				} else {
+					streamErr = rErr
+				}
+				break
+			}
+		}
+		resp.Body.Close()
+		cancel()
+
+		if streamErr == nil {
+			mbWritten := float64(currentWritten) / (1024 * 1024)
+			elapsed := time.Since(startTime)
+			speedMBs := mbWritten / elapsed.Seconds()
+			Logger.Info("DOWNLOADER", token, "Successfully downloaded %s: %.2f MB in %v (avg speed: %.2f MB/s)",
+				label, mbWritten, elapsed.Round(time.Millisecond), speedMBs)
+			if onProgress != nil && totalSize > 0 {
+				onProgress(totalSize, totalSize, speedMBs, 100)
+			}
+			return nil
+		}
+
+		Logger.Warn("DOWNLOADER", token, "Stream stalled/interrupted at %.2f MB (%v), auto-resuming from byte %d (attempt %d/%d)...",
+			float64(currentWritten)/(1024*1024), streamErr, currentWritten, attempt, maxRetries)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	mbWritten := float64(written) / (1024 * 1024)
-	speedMBs := mbWritten / elapsed.Seconds()
-	Logger.Info("DOWNLOADER", token, "Successfully downloaded %s: %.2f MB in %v (avg speed: %.2f MB/s)",
-		label, mbWritten, elapsed.Round(time.Millisecond), speedMBs)
-
-	return nil
+	return fmt.Errorf("download of %s failed after %d auto-resume attempts (downloaded %.2f MB)", label, maxRetries, float64(currentWritten)/(1024*1024))
 }
 
 func MergeVideoAudio(videoPath, audioPath, outputPath, token string) error {
@@ -571,3 +647,54 @@ func CompressVideo(src, dst, token string) error {
 	Logger.Info("FFMPEG", token, "Data saver compressed video in %v", time.Since(t0))
 	return nil
 }
+
+func BurnSubtitle(videoPath, audioPath, subPath, outputPath, token string) error {
+	t0 := time.Now()
+	Logger.Info("FFMPEG", token, "Burning Hardcoded Subtitles into Video: Video=%s, Audio=%s, Sub=%s -> %s",
+		videoPath, audioPath, subPath, outputPath)
+
+	escapedSub := strings.ReplaceAll(subPath, `\`, `/`)
+	escapedSub = strings.ReplaceAll(escapedSub, `:`, `\:`)
+
+	subFilter := fmt.Sprintf("subtitles='%s':force_style='FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=1,MarginV=25'", escapedSub)
+
+	var cmd *exec.Cmd
+	if audioPath != "" && audioPath != videoPath {
+		cmd = exec.Command("ffmpeg", "-y", "-threads", "0",
+			"-i", videoPath,
+			"-i", audioPath,
+			"-filter_complex", fmt.Sprintf("[0:v]%s[v]", subFilter),
+			"-map", "[v]",
+			"-map", "1:a:0",
+			"-c:v", "libx264",
+			"-preset", "ultrafast",
+			"-crf", "22",
+			"-c:a", "aac",
+			"-b:a", "128k",
+			"-movflags", "+faststart",
+			outputPath,
+		)
+	} else {
+		cmd = exec.Command("ffmpeg", "-y", "-threads", "0",
+			"-i", videoPath,
+			"-vf", subFilter,
+			"-c:v", "libx264",
+			"-preset", "ultrafast",
+			"-crf", "22",
+			"-c:a", "copy",
+			"-movflags", "+faststart",
+			outputPath,
+		)
+	}
+
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(t0)
+	if err != nil {
+		Logger.Error("FFMPEG", token, "Hardsub burning failed in %v: %v. Output:\n%s", elapsed, err, string(out))
+		return fmt.Errorf("hardsub error: %v, output: %s", err, string(out))
+	}
+
+	Logger.Info("FFMPEG", token, "Hardcoded subtitles burned successfully in %v -> %s", elapsed.Round(time.Millisecond), outputPath)
+	return nil
+}
+
