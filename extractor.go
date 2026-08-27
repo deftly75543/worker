@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -473,12 +475,213 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		return quickMedia, nil
 	}
 
+	Logger.Warn("EXTRACTOR", token, "RapidAPI providers rate-limited (HTTP 429). Activating Fail-Safe YouTube Innertube Engine...")
+	innerMedia, innerErr := ExtractDirectFromInnertube(videoID, quality, audioLang, token)
+	if innerErr == nil && innerMedia != nil {
+		return innerMedia, nil
+	}
+
+	Logger.Warn("EXTRACTOR", token, "Innertube failed (%v). Trying native yt-dlp extractor fallback...", innerErr)
+	ytdlMedia, ytdlErr := ExtractFromYtDlp(videoID, quality, audioLang, token)
+	if ytdlErr == nil && ytdlMedia != nil {
+		return ytdlMedia, nil
+	}
+
 	if lastErr != nil {
-		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and keys exhausted. Last error: %v", lastErr)
+		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and fallbacks exhausted. Last error: %v", lastErr)
 		return nil, lastErr
 	}
-	Logger.Error("EXTRACTOR", token, "No suitable video stream found in RapidAPI response")
+	Logger.Error("EXTRACTOR", token, "No suitable video stream found in any provider")
 	return nil, fmt.Errorf("no suitable video stream found")
+}
+
+func ExtractDirectFromInnertube(videoID, quality, audioLang, token string) (*ExtractedMedia, error) {
+	postBody, _ := json.Marshal(map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "ANDROID",
+				"clientVersion": "19.09.37",
+				"hl":            "fa",
+				"gl":            "US",
+			},
+		},
+		"videoId": videoID,
+	})
+
+	req, err := http.NewRequest("POST", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false", bytes.NewReader(postBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var pData struct {
+		VideoDetails struct {
+			Title  string `json:"title"`
+			Author string `json:"author"`
+		} `json:"videoDetails"`
+		StreamingData struct {
+			Formats []struct {
+				URL          string `json:"url"`
+				QualityLabel string `json:"qualityLabel"`
+				Quality      string `json:"quality"`
+			} `json:"formats"`
+			AdaptiveFormats []struct {
+				URL          string `json:"url"`
+				MimeType     string `json:"mimeType"`
+				Bitrate      int    `json:"bitrate"`
+				QualityLabel string `json:"qualityLabel"`
+				AudioQuality string `json:"audioQuality"`
+			} `json:"adaptiveFormats"`
+		} `json:"streamingData"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&pData); err != nil {
+		return nil, err
+	}
+
+	title := pData.VideoDetails.Title
+	if title == "" {
+		title = "YouTube Video " + videoID
+	}
+
+	var bestVideoURL, bestAudioURL string
+	var bestAudioBitrate int
+	var hasAudio bool
+
+	for _, f := range pData.StreamingData.Formats {
+		if f.URL == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(f.QualityLabel), quality) || strings.Contains(strings.ToLower(f.Quality), quality) {
+			bestVideoURL = f.URL
+			hasAudio = true
+			break
+		}
+	}
+
+	for _, f := range pData.StreamingData.AdaptiveFormats {
+		if f.URL == "" {
+			continue
+		}
+		if strings.HasPrefix(f.MimeType, "video/") {
+			if strings.Contains(strings.ToLower(f.QualityLabel), quality) {
+				bestVideoURL = f.URL
+			} else if bestVideoURL == "" && strings.Contains(strings.ToLower(f.QualityLabel), "720") {
+				bestVideoURL = f.URL
+			} else if bestVideoURL == "" {
+				bestVideoURL = f.URL
+			}
+		} else if strings.HasPrefix(f.MimeType, "audio/") {
+			if f.Bitrate > bestAudioBitrate {
+				bestAudioBitrate = f.Bitrate
+				bestAudioURL = f.URL
+			}
+		}
+	}
+
+	isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
+	if isAudioOnly {
+		if bestAudioURL == "" {
+			bestAudioURL = bestVideoURL
+		}
+		if bestAudioURL != "" {
+			Logger.Info("INNERTUBE", token, "Extracted direct audio from YouTube Innertube")
+			return &ExtractedMedia{
+				Type:          "audio",
+				Title:         title,
+				AudioURL:      bestAudioURL,
+				AudioLangName: "صوت اصلی",
+				HasAudio:      true,
+			}, nil
+		}
+	}
+
+	if bestVideoURL != "" {
+		Logger.Info("INNERTUBE", token, "Extracted direct video from YouTube Innertube (100%% Fail-Safe)")
+		return &ExtractedMedia{
+			Type:          "video",
+			Title:         title,
+			VideoURL:      bestVideoURL,
+			AudioURL:      bestAudioURL,
+			AudioLangName: "پیش‌فرض",
+			HasAudio:      hasAudio || (bestAudioURL == ""),
+		}, nil
+	}
+
+	return nil, fmt.Errorf("no direct streams in innertube")
+}
+
+func ExtractFromYtDlp(videoID, quality, audioLang, token string) (*ExtractedMedia, error) {
+	vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+
+	cmdCheck := exec.Command("yt-dlp", "--version")
+	if err := cmdCheck.Run(); err != nil {
+		return nil, fmt.Errorf("yt-dlp binary not found: %w", err)
+	}
+
+	formatSelector := "bestvideo[height<=" + quality + "]+bestaudio/best[height<=" + quality + "]/best"
+	if quality == "audio" || quality == "mp3" || quality == "m4a" {
+		formatSelector = "bestaudio/best"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "yt-dlp", "-g", "-f", formatSelector, vURL)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("yt-dlp error: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return nil, fmt.Errorf("yt-dlp returned no URLs")
+	}
+
+	titleCmd := exec.CommandContext(ctx, "yt-dlp", "--get-title", vURL)
+	titleBytes, _ := titleCmd.Output()
+	title := strings.TrimSpace(string(titleBytes))
+	if title == "" {
+		title = "YouTube Video " + videoID
+	}
+
+	if len(lines) == 1 {
+		isAudio := (quality == "audio" || quality == "mp3" || quality == "m4a")
+		if isAudio {
+			return &ExtractedMedia{
+				Type:          "audio",
+				Title:         title,
+				AudioURL:      lines[0],
+				AudioLangName: "صوت اصلی",
+				HasAudio:      true,
+			}, nil
+		}
+		return &ExtractedMedia{
+			Type:          "video",
+			Title:         title,
+			VideoURL:      lines[0],
+			AudioURL:      "",
+			AudioLangName: "پیش‌فرض",
+			HasAudio:      true,
+		}, nil
+	}
+
+	return &ExtractedMedia{
+		Type:          "video",
+		Title:         title,
+		VideoURL:      lines[0],
+		AudioURL:      lines[1],
+		AudioLangName: "پیش‌فرض",
+		HasAudio:      false,
+	}, nil
 }
 
 func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
