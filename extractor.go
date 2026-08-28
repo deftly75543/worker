@@ -13,8 +13,44 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type ProviderHealth struct {
+	Name          string
+	CooldownUntil time.Time
+	SuccessCount  int
+	FailCount     int
+}
+
+var providerCircuit sync.Map
+
+func isProviderCoolingDown(name string) bool {
+	if val, ok := providerCircuit.Load(name); ok {
+		h := val.(*ProviderHealth)
+		if time.Now().Before(h.CooldownUntil) {
+			return true
+		}
+	}
+	return false
+}
+
+func reportProviderResult(name string, success bool, isRateLimit bool) {
+	val, _ := providerCircuit.LoadOrStore(name, &ProviderHealth{Name: name})
+	h := val.(*ProviderHealth)
+	if success {
+		h.SuccessCount++
+		h.CooldownUntil = time.Time{}
+	} else {
+		h.FailCount++
+		if isRateLimit {
+			h.CooldownUntil = time.Now().Add(45 * time.Minute)
+		} else {
+			h.CooldownUntil = time.Now().Add(2 * time.Minute)
+		}
+	}
+}
 
 type ExtractedMedia struct {
 	Type          string // "video" or "audio"
@@ -257,12 +293,64 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		return nil, fmt.Errorf("invalid youtube url: %s", rawURL)
 	}
 
-	Logger.Info("EXTRACTOR", token, "Starting extraction for VideoID: %s, Requested Quality: %s, AudioLang: %s", videoID, quality, audioLang)
-
+	Logger.Info("EXTRACTOR", token, "Starting smart extraction for VideoID: %s, Quality: %s, AudioLang: %s", videoID, quality, audioLang)
 	keys := getRapidAPIKeys(customKeys)
-	client := &http.Client{Timeout: 25 * time.Second}
+
+	type ProviderCandidate struct {
+		Name    string
+		Extract func(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error)
+	}
+
+	providers := []ProviderCandidate{
+		{"YouTube Media Downloader (Primary)", extractFromPrimaryRapidAPI},
+		{"Cloud Api Hub", extractFromCloudApiHub},
+		{"YouTube Info & Download API", extractFromYouTubeInfoDownloadAPI},
+		{"YouTube Video And Shorts Downloader", extractFromYouTubeVideoAndShortsDownloader},
+		{"YouTube Video And Shorts Downloader V2", extractFromYouTubeVideoAndShortsDownloaderV2},
+		{"YouTube MP4/MP3 Downloader", extractFromYouTubeMp4Mp3Downloader},
+		{"Ziyotech Youtube Downloader", extractFromZiyotech},
+		{"YouTube Quick Video Downloader", extractFromYouTubeQuickVideoDownloader},
+		{"YouTube138 API", extractFromYouTube138},
+	}
 
 	var lastErr error
+	for _, p := range providers {
+		if isProviderCoolingDown(p.Name) {
+			Logger.Debug("EXTRACTOR", token, "Skipping provider '%s' (Dynamic Cooldown / Rate Limit active)", p.Name)
+			continue
+		}
+
+		Logger.Info("EXTRACTOR", token, "Trying provider: %s", p.Name)
+		media, err := p.Extract(videoID, quality, audioLang, keys, token)
+		if err == nil && media != nil {
+			reportProviderResult(p.Name, true, false)
+			Logger.Info("EXTRACTOR", token, "Provider '%s' SUCCESS -> Extracted %s (%s)", p.Name, media.Type, media.Title)
+			return media, nil
+		}
+
+		isRateLimit := false
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "403") || strings.Contains(errStr, "exceeded") {
+				isRateLimit = true
+			}
+		}
+		reportProviderResult(p.Name, false, isRateLimit)
+		Logger.Warn("EXTRACTOR", token, "Provider '%s' failed (RateLimit=%v): %v", p.Name, isRateLimit, err)
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		Logger.Error("EXTRACTOR", token, "All RapidAPI providers exhausted. Last error: %v", lastErr)
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no suitable stream found in any provider")
+}
+
+func extractFromPrimaryRapidAPI(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+
 	for idx, key := range keys {
 		maskedKey := "..." + key[len(key)-6:]
 		Logger.Debug("EXTRACTOR", token, "Trying RapidAPI key #%d (%s)", idx+1, maskedKey)
@@ -270,7 +358,6 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		reqURL := fmt.Sprintf("https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=%s", url.QueryEscape(videoID))
 		req, err := http.NewRequest("GET", reqURL, nil)
 		if err != nil {
-			Logger.Warn("EXTRACTOR", token, "Failed to create HTTP request for key #%d: %v", idx+1, err)
 			lastErr = err
 			continue
 		}
@@ -283,7 +370,6 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		elapsed := time.Since(startTime)
 
 		if err != nil {
-			Logger.Warn("EXTRACTOR", token, "RapidAPI request error with key #%d after %v: %v", idx+1, elapsed, err)
 			lastErr = err
 			continue
 		}
@@ -291,8 +377,7 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			resp.Body.Close()
-			Logger.Warn("EXTRACTOR", token, "RapidAPI #1 returned HTTP %d with key #%d in %v: %s", resp.StatusCode, idx+1, elapsed, string(bodyBytes))
-			lastErr = fmt.Errorf("rapidapi returned HTTP %d", resp.StatusCode)
+			lastErr = fmt.Errorf("rapidapi returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 			continue
 		}
 
@@ -300,7 +385,6 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		err = json.NewDecoder(resp.Body).Decode(&data)
 		resp.Body.Close()
 		if err != nil {
-			Logger.Warn("EXTRACTOR", token, "JSON decode error from RapidAPI with key #%d: %v", idx+1, err)
 			lastErr = err
 			continue
 		}
@@ -324,37 +408,28 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 			}
 		}
 
-		Logger.Info("EXTRACTOR", token, "Extracted Title: '%s', Channel: '%s', Duration: %v sec, Videos: %d, Audios: %d",
-			title, data.ChannelTitle, data.LengthSeconds, len(data.Videos.Items), len(allAudios))
-
-		// انتخاب هوشمند ترک صوتی بر اساس درخواست کاربر یا اولویت فارسی/اصلی
 		bestAudioURL, selectedLangName := selectBestAudioStream(allAudios, audioLang, token)
-
-		// اگر ترکی از وب‌سرویس دریافت نشد، به عنوان آخرین راهکار از اینرتیوب استعلام می‌کنیم
 		if bestAudioURL == "" {
 			inURL, inName, inErr := ExtractFromInnertube(videoID, audioLang, token)
 			if inErr == nil && inURL != "" {
 				bestAudioURL = inURL
 				selectedLangName = inName
-				Logger.Info("EXTRACTOR", token, "Resolved targeted audio stream via YouTube Innertube: %s", selectedLangName)
 			}
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if bestAudioURL != "" {
-				Logger.Info("EXTRACTOR", token, "Audio-only requested (%s). Successfully matched audio stream.", selectedLangName)
 				return &ExtractedMedia{
 					Type:          "audio",
 					Title:         title,
 					AudioURL:      bestAudioURL,
 					AudioLangName: selectedLangName,
+					HasAudio:      true,
 				}, nil
 			}
-			Logger.Warn("EXTRACTOR", token, "Audio requested but no audio stream found in RapidAPI response")
 		}
 
-		// Find matching video stream
 		targetHeight := 1080
 		want60fps := strings.Contains(quality, "60")
 		if strings.Contains(quality, "2160") || strings.Contains(quality, "4k") {
@@ -376,7 +451,6 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		var targetVideoURL string
 		var hasAudio bool
 		var selectedQuality string
-		var selectedFPS any
 
 		for i := range data.Videos.Items {
 			if data.Videos.Items[i].URL == "" {
@@ -399,34 +473,24 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 						targetVideoURL = v.URL
 						hasAudio = v.HasAudio
 						selectedQuality = v.Quality
-						selectedFPS = v.FPS
 					}
 					continue
 				}
 				targetVideoURL = v.URL
 				hasAudio = v.HasAudio
 				selectedQuality = v.Quality
-				selectedFPS = v.FPS
 				break
 			}
 		}
 
-		// Fallback to highest quality available if specific height not found
 		if targetVideoURL == "" && len(data.Videos.Items) > 0 {
 			targetVideoURL = data.Videos.Items[0].URL
 			hasAudio = data.Videos.Items[0].HasAudio
 			selectedQuality = data.Videos.Items[0].Quality
-			selectedFPS = data.Videos.Items[0].FPS
-			Logger.Warn("EXTRACTOR", token, "Exact match for %dp not found, falling back to: %s (fps: %v)", targetHeight, selectedQuality, selectedFPS)
 		}
 
 		if targetVideoURL != "" {
 			audioURL := bestAudioURL
-			if audioURL != "" {
-				Logger.Info("EXTRACTOR", token, "Video stream (%s) attached with targeted audio track [%s] for FFmpeg audio replacement.", selectedQuality, selectedLangName)
-			} else if hasAudio {
-				Logger.Info("EXTRACTOR", token, "Video stream (%s) contains embedded audio.", selectedQuality)
-			}
 			return &ExtractedMedia{
 				Type:          "video",
 				Title:         title,
@@ -438,64 +502,7 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		}
 	}
 
-	Logger.Warn("EXTRACTOR", token, "Primary RapidAPI provider failed or rate-limited. Falling back to Cloud Api Hub provider...")
-	cloudMedia, cloudErr := extractFromCloudApiHub(videoID, quality, audioLang, keys, token)
-	if cloudErr == nil && cloudMedia != nil {
-		return cloudMedia, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "Cloud Api Hub provider failed (%v). Falling back to YouTube Info & Download API provider...", cloudErr)
-	infoMedia, infoErr := extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang, keys, token)
-	if infoErr == nil && infoMedia != nil {
-		return infoMedia, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "YouTube Info & Download API failed (%v). Falling back to YouTube Video And Shorts Downloader provider...", infoErr)
-	shortsMedia, shortsErr := extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang, keys, token)
-	if shortsErr == nil && shortsMedia != nil {
-		return shortsMedia, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader failed (%v). Falling back to YouTube Video And Shorts Downloader V2 provider...", shortsErr)
-	v2Media, v2Err := extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang, keys, token)
-	if v2Err == nil && v2Media != nil {
-		return v2Media, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader V2 failed (%v). Falling back to YouTube MP4/MP3 Downloader provider...", v2Err)
-	mp4Media, mp4Err := extractFromYouTubeMp4Mp3Downloader(videoID, quality, audioLang, keys, token)
-	if mp4Err == nil && mp4Media != nil {
-		return mp4Media, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "YouTube MP4/MP3 Downloader failed (%v). Falling back to Ziyotech Youtube Downloader API provider...", mp4Err)
-	ziyoMedia, ziyoErr := extractFromZiyotech(videoID, quality, audioLang, keys, token)
-	if ziyoErr == nil && ziyoMedia != nil {
-		return ziyoMedia, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "Ziyotech API failed (%v). Falling back to YouTube Quick Video Downloader provider...", ziyoErr)
-	quickMedia, quickErr := extractFromYouTubeQuickVideoDownloader(videoID, quality, audioLang, keys, token)
-	if quickErr == nil && quickMedia != nil {
-		return quickMedia, nil
-	}
-
-	Logger.Warn("EXTRACTOR", token, "YouTube Quick Video Downloader failed (%v). Falling back to YouTube138 API provider...", quickErr)
-	yt138Media, yt138Err := extractFromYouTube138(videoID, quality, audioLang, keys, token)
-	if yt138Err == nil && yt138Media != nil {
-		return yt138Media, nil
-	}
-
-	if yt138Err != nil {
-		lastErr = yt138Err
-	}
-
-	if lastErr != nil {
-		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and fallbacks exhausted. Last error: %v", lastErr)
-		return nil, lastErr
-	}
-	Logger.Error("EXTRACTOR", token, "No suitable video stream found in any provider")
-	return nil, fmt.Errorf("no suitable video stream found")
+	return nil, lastErr
 }
 
 func ExtractDirectFromInnertube(videoID, quality, audioLang, token string) (*ExtractedMedia, error) {
