@@ -126,6 +126,99 @@ func parseFPS(val any) int {
 	}
 }
 
+func parseStreamHeight(im map[string]any, u string) int {
+	if h, ok := im["height"].(float64); ok && h > 0 {
+		return int(h)
+	}
+	if h, ok := im["height"].(int); ok && h > 0 {
+		return h
+	}
+	qLabel := strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+	if strings.Contains(qLabel, "2160") {
+		return 2160
+	}
+	if strings.Contains(qLabel, "1440") {
+		return 1440
+	}
+	if strings.Contains(qLabel, "1080") {
+		return 1080
+	}
+	if strings.Contains(qLabel, "720") {
+		return 720
+	}
+	if strings.Contains(qLabel, "480") {
+		return 480
+	}
+	if strings.Contains(qLabel, "360") {
+		return 360
+	}
+	if strings.Contains(qLabel, "240") {
+		return 240
+	}
+
+	q := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+	if strings.Contains(q, "2160") || strings.Contains(q, "hd2160") {
+		return 2160
+	}
+	if strings.Contains(q, "1440") || strings.Contains(q, "hd1440") {
+		return 1440
+	}
+	if strings.Contains(q, "1080") || strings.Contains(q, "hd1080") {
+		return 1080
+	}
+	if strings.Contains(q, "720") || strings.Contains(q, "hd720") {
+		return 720
+	}
+	if strings.Contains(q, "480") || strings.Contains(q, "large") {
+		return 480
+	}
+	if strings.Contains(q, "360") || strings.Contains(q, "medium") {
+		return 360
+	}
+	if strings.Contains(q, "240") || strings.Contains(q, "small") {
+		return 240
+	}
+
+	itag := 0
+	if it, ok := im["itag"].(float64); ok {
+		itag = int(it)
+	}
+	if it, ok := im["itag"].(int); ok {
+		itag = it
+	}
+	if itag == 0 {
+		if strings.Contains(u, "itag=22") || strings.Contains(u, "itag=136") || strings.Contains(u, "itag=298") || strings.Contains(u, "itag=302") || strings.Contains(u, "itag=398") {
+			return 720
+		}
+		if strings.Contains(u, "itag=137") || strings.Contains(u, "itag=299") || strings.Contains(u, "itag=303") || strings.Contains(u, "itag=399") {
+			return 1080
+		}
+		if strings.Contains(u, "itag=135") || strings.Contains(u, "itag=244") || strings.Contains(u, "itag=397") {
+			return 480
+		}
+		if strings.Contains(u, "itag=18") || strings.Contains(u, "itag=134") || strings.Contains(u, "itag=243") || strings.Contains(u, "itag=396") {
+			return 360
+		}
+	}
+	switch itag {
+	case 313, 401, 272:
+		return 2160
+	case 271, 308, 400:
+		return 1440
+	case 137, 299, 303, 399:
+		return 1080
+	case 22, 136, 298, 302, 398:
+		return 720
+	case 135, 244, 397:
+		return 480
+	case 18, 134, 243, 396:
+		return 360
+	case 133, 242, 395:
+		return 240
+	}
+	return 0
+}
+
 func getRapidAPIKeys(customKeys string) []string {
 	defaultKey := "6a44c52b98mshf8d49aef80a8607p1ad3d4jsn3bbeb1e34dc8"
 	rawKeys := strings.TrimSpace(customKeys)
@@ -311,6 +404,9 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		{"Ziyotech Youtube Downloader", extractFromZiyotech},
 		{"YouTube Quick Video Downloader", extractFromYouTubeQuickVideoDownloader},
 		{"YouTube138 API", extractFromYouTube138},
+		{"Direct Innertube Player", func(vID, q, aLang string, k []string, tok string) (*ExtractedMedia, error) {
+			return ExtractDirectFromInnertube(vID, q, aLang, tok)
+		}},
 	}
 
 	var lastErr error
@@ -338,6 +434,21 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		reportProviderResult(p.Name, false, isRateLimit)
 		Logger.Warn("EXTRACTOR", token, "Provider '%s' failed (RateLimit=%v): %v", p.Name, isRateLimit, err)
 		lastErr = err
+	}
+
+	// اگر کیفیت درخواستی در هیچ پروایدری دقیقاً یافت نشد، بهترین استریم موجود را تحویل بده
+	if quality != "audio" && quality != "mp3" && quality != "m4a" && quality != "best" {
+		Logger.Warn("EXTRACTOR", token, "Exact quality '%s' not found across providers, initiating graceful best-quality fallback...", quality)
+		for _, p := range providers {
+			if isProviderCoolingDown(p.Name) {
+				continue
+			}
+			media, err := p.Extract(videoID, "best", audioLang, keys, token)
+			if err == nil && media != nil {
+				Logger.Info("EXTRACTOR", token, "Graceful fallback SUCCESS via '%s' -> Extracted %s (%s)", p.Name, media.Type, media.Title)
+				return media, nil
+			}
+		}
 	}
 
 	if lastErr != nil {
@@ -831,12 +942,13 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 				targetHeight = 240
 			}
 
+			streamHeight := parseStreamHeight(im, u)
 			if isAudioStream || (!itemHasVideo && itemHasAudio) {
 				if audioURL == "" {
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
+				if streamHeight == targetHeight || strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
@@ -1234,12 +1346,13 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 				itemHasVideo = hv
 			}
 
+			streamHeight := parseStreamHeight(im, u)
 			if isAudioStream || (!itemHasVideo && itemHasAudio) {
 				if audioURL == "" {
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
+				if streamHeight == targetHeight || strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
@@ -1414,12 +1527,13 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 				itemHasVideo = hv
 			}
 
+			streamHeight := parseStreamHeight(im, u)
 			if isAudioStream || (!itemHasVideo && itemHasAudio) {
 				if audioURL == "" {
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
+				if streamHeight == targetHeight || strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
@@ -2013,13 +2127,14 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 			}
 
 			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
+			streamHeight := parseStreamHeight(im, u)
 
 			if isAudioStream {
 				if audioURL == "" {
 					audioURL = u
 				}
 			} else {
-				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
+				if streamHeight == targetHeight || strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = strings.Contains(mimeStr, "video") && !strings.Contains(mimeStr, "codecs=\"avc")
 				}
