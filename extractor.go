@@ -794,6 +794,15 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 			}
 
 			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
+			}
+
+			// فیلتر کامل و قطعی تصاویر بندانگشتی و استوری‌بردها (webp / jpeg / sprite sheets)
+			if strings.Contains(mimeStr, "image") || strings.Contains(mimeStr, "webp") || strings.Contains(u, "storyboard") || strings.Contains(u, "mime=image") || strings.Contains(qStr, "storyboard") {
+				continue
+			}
+
 			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
 			itemHasAudio := false
 			if ha, ok := im["hasAudio"].(bool); ok {
@@ -809,7 +818,7 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) || (quality == "480" && strings.Contains(qStr, "480")) || (quality == "360" && strings.Contains(qStr, "360")) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				} else if videoURL == "" {
