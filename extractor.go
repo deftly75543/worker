@@ -813,19 +813,39 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 				itemHasVideo = hv
 			}
 
+			targetHeight := 720
+			if strings.Contains(quality, "2160") || strings.Contains(quality, "4k") {
+				targetHeight = 2160
+			} else if strings.Contains(quality, "1440") || strings.Contains(quality, "2k") {
+				targetHeight = 1440
+			} else if strings.Contains(quality, "1080") {
+				targetHeight = 1080
+			} else if strings.Contains(quality, "720") {
+				targetHeight = 720
+			} else if strings.Contains(quality, "480") {
+				targetHeight = 480
+			} else if strings.Contains(quality, "360") {
+				targetHeight = 360
+			} else if strings.Contains(quality, "240") {
+				targetHeight = 240
+			}
+
 			if isAudioStream || (!itemHasVideo && itemHasAudio) {
 				if audioURL == "" {
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) || (quality == "480" && strings.Contains(qStr, "480")) || (quality == "360" && strings.Contains(qStr, "360")) {
-					videoURL = u
-					hasAudio = itemHasAudio
-				} else if videoURL == "" {
+				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
 			}
+		}
+
+		if videoURL == "" && !isAudioOnly {
+			// اگر کیفیت درخواستی در این پروایدر پیدا نشد، به پروایدر بعدی سوییچ کن
+			lastErr = fmt.Errorf("cloud api hub does not have requested quality %s", quality)
+			continue
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
@@ -1175,7 +1195,28 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
 			}
 
-			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			// فیلتر تصاویر و استوری‌برد
+			if strings.Contains(mimeStr, "image") || strings.Contains(mimeStr, "webp") || strings.Contains(u, "storyboard") || strings.Contains(u, "mime=image") || strings.Contains(qStr, "storyboard") {
+				continue
+			}
+
+			targetHeight := 720
+			if strings.Contains(quality, "2160") || strings.Contains(quality, "4k") {
+				targetHeight = 2160
+			} else if strings.Contains(quality, "1440") || strings.Contains(quality, "2k") {
+				targetHeight = 1440
+			} else if strings.Contains(quality, "1080") {
+				targetHeight = 1080
+			} else if strings.Contains(quality, "720") {
+				targetHeight = 720
+			} else if strings.Contains(quality, "480") {
+				targetHeight = 480
+			} else if strings.Contains(quality, "360") {
+				targetHeight = 360
+			} else if strings.Contains(quality, "240") {
+				targetHeight = 240
+			}
+
 			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
 			itemHasAudio := false
 			if ha, ok := im["hasAudio"].(bool); ok {
@@ -1191,14 +1232,16 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
-					videoURL = u
-					hasAudio = itemHasAudio
-				} else if videoURL == "" {
+				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
 			}
+		}
+
+		if videoURL == "" && !isAudioOnly {
+			lastErr = fmt.Errorf("video-and-shorts downloader does not have requested quality %s", quality)
+			continue
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
@@ -1322,12 +1365,33 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 				continue
 			}
 
-			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
-			if qStr == "" || qStr == "<nil>" {
-				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
 			}
 
-			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			// فیلتر تصاویر و استوری‌برد
+			if strings.Contains(mimeStr, "image") || strings.Contains(mimeStr, "webp") || strings.Contains(u, "storyboard") || strings.Contains(u, "mime=image") || strings.Contains(qStr, "storyboard") {
+				continue
+			}
+
+			targetHeight := 720
+			if strings.Contains(quality, "2160") || strings.Contains(quality, "4k") {
+				targetHeight = 2160
+			} else if strings.Contains(quality, "1440") || strings.Contains(quality, "2k") {
+				targetHeight = 1440
+			} else if strings.Contains(quality, "1080") {
+				targetHeight = 1080
+			} else if strings.Contains(quality, "720") {
+				targetHeight = 720
+			} else if strings.Contains(quality, "480") {
+				targetHeight = 480
+			} else if strings.Contains(quality, "360") {
+				targetHeight = 360
+			} else if strings.Contains(quality, "240") {
+				targetHeight = 240
+			}
+
 			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
 			itemHasAudio := false
 			if ha, ok := im["hasAudio"].(bool); ok {
@@ -1343,14 +1407,16 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 					audioURL = u
 				}
 			} else if itemHasVideo {
-				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
-					videoURL = u
-					hasAudio = itemHasAudio
-				} else if videoURL == "" {
+				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = itemHasAudio
 				}
 			}
+		}
+
+		if videoURL == "" && !isAudioOnly {
+			lastErr = fmt.Errorf("video-and-shorts downloader (V2) does not have requested quality %s", quality)
+			continue
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
@@ -1906,7 +1972,34 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 			if qStr == "" || qStr == "<nil>" {
 				qStr = strings.ToLower(fmt.Sprintf("%v", im["quality"]))
 			}
+
 			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
+			}
+
+			// فیلتر تصاویر و استوری‌برد
+			if strings.Contains(mimeStr, "image") || strings.Contains(mimeStr, "webp") || strings.Contains(u, "storyboard") || strings.Contains(u, "mime=image") || strings.Contains(qStr, "storyboard") {
+				continue
+			}
+
+			targetHeight := 720
+			if strings.Contains(quality, "2160") || strings.Contains(quality, "4k") {
+				targetHeight = 2160
+			} else if strings.Contains(quality, "1440") || strings.Contains(quality, "2k") {
+				targetHeight = 1440
+			} else if strings.Contains(quality, "1080") {
+				targetHeight = 1080
+			} else if strings.Contains(quality, "720") {
+				targetHeight = 720
+			} else if strings.Contains(quality, "480") {
+				targetHeight = 480
+			} else if strings.Contains(quality, "360") {
+				targetHeight = 360
+			} else if strings.Contains(quality, "240") {
+				targetHeight = 240
+			}
+
 			isAudioStream := strings.Contains(mimeStr, "audio") || strings.Contains(u, "mime=audio")
 
 			if isAudioStream {
@@ -1914,13 +2007,16 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 					audioURL = u
 				}
 			} else {
-				if strings.Contains(qStr, quality) || (quality == "1080" && strings.Contains(qStr, "1080")) || (quality == "720" && strings.Contains(qStr, "720")) {
+				if strings.Contains(qStr, strconv.Itoa(targetHeight)) || strings.Contains(qStr, quality) {
 					videoURL = u
 					hasAudio = strings.Contains(mimeStr, "video") && !strings.Contains(mimeStr, "codecs=\"avc")
-				} else if videoURL == "" {
-					videoURL = u
 				}
 			}
+		}
+
+		if videoURL == "" && !isAudioOnly {
+			lastErr = fmt.Errorf("youtube138 api does not have requested quality %s", quality)
+			continue
 		}
 
 		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
