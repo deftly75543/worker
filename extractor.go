@@ -1618,8 +1618,10 @@ func extractFromZiyotech(videoID, quality, audioLang string, keys []string, toke
 		}
 
 		if videoURL == "" && audioURL == "" {
-			if directURL, ok := rawMap["url"].(string); ok && directURL != "" {
-				videoURL = directURL
+			if rMap, ok := rawVal.(map[string]any); ok {
+				if directURL, ok := rMap["url"].(string); ok && directURL != "" {
+					videoURL = directURL
+				}
 			}
 		}
 
