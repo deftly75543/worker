@@ -365,10 +365,7 @@ func extractFromPrimaryRapidAPI(videoID, quality, audioLang string, keys []strin
 		req.Header.Set("x-rapidapi-key", key)
 		req.Header.Set("Accept", "application/json")
 
-		startTime := time.Now()
 		resp, err := client.Do(req)
-		elapsed := time.Since(startTime)
-
 		if err != nil {
 			lastErr = err
 			continue
@@ -450,7 +447,6 @@ func extractFromPrimaryRapidAPI(videoID, quality, audioLang string, keys []strin
 
 		var targetVideoURL string
 		var hasAudio bool
-		var selectedQuality string
 
 		for i := range data.Videos.Items {
 			if data.Videos.Items[i].URL == "" {
@@ -472,13 +468,11 @@ func extractFromPrimaryRapidAPI(videoID, quality, audioLang string, keys []strin
 					if targetVideoURL == "" {
 						targetVideoURL = v.URL
 						hasAudio = v.HasAudio
-						selectedQuality = v.Quality
 					}
 					continue
 				}
 				targetVideoURL = v.URL
 				hasAudio = v.HasAudio
-				selectedQuality = v.Quality
 				break
 			}
 		}
@@ -486,7 +480,6 @@ func extractFromPrimaryRapidAPI(videoID, quality, audioLang string, keys []strin
 		if targetVideoURL == "" && len(data.Videos.Items) > 0 {
 			targetVideoURL = data.Videos.Items[0].URL
 			hasAudio = data.Videos.Items[0].HasAudio
-			selectedQuality = data.Videos.Items[0].Quality
 		}
 
 		if targetVideoURL != "" {
