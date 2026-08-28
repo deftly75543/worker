@@ -745,6 +745,15 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 		var formatItems []any
 		if f, ok := rawMap["formats"].([]any); ok {
 			formatItems = f
+		} else if dMap, ok := rawMap["data"].(map[string]any); ok {
+			if t, ok := dMap["title"].(string); ok && t != "" {
+				title = t
+			}
+			if df, ok := dMap["formats"].([]any); ok {
+				formatItems = df
+			} else if dv, ok := dMap["videos"].([]any); ok {
+				formatItems = dv
+			}
 		} else if d, ok := rawMap["data"].([]any); ok {
 			formatItems = d
 		} else if v, ok := rawMap["videos"].([]any); ok {
@@ -1732,7 +1741,7 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 		maskedKey := "..." + key[len(key)-6:]
 		Logger.Info("EXTRACTOR", token, "Trying YouTube138 API with key #%d (%s)", idx+1, maskedKey)
 
-		reqURL := fmt.Sprintf("https://youtube138.p.rapidapi.com/video/streaming-data/?id=%s&hl=fa&gl=US", url.QueryEscape(videoID))
+		reqURL := fmt.Sprintf("https://youtube138.p.rapidapi.com/video/streaming-data/?id=%s", url.QueryEscape(videoID))
 		req, err := http.NewRequest("GET", reqURL, nil)
 		if err != nil {
 			lastErr = err
