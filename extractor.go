@@ -2186,7 +2186,7 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 
 // ExtractVideoMetadata استخراج مستقیم و جامع مشخصات، کیفیت‌ها و حجم‌های واقعی ویدیو در ورکر
 func ExtractVideoMetadata(videoURL string) (map[string]any, error) {
-	vid := ExtractVideoID(videoURL)
+	vid := extractVideoID(videoURL)
 	if vid == "" {
 		vid = videoURL
 	}
