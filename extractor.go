@@ -703,6 +703,7 @@ func ExtractFromYtDlp(videoID, quality, audioLang, token string) (*ExtractedMedi
 func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
 	client := &http.Client{Timeout: 25 * time.Second}
 	var lastErr error
+	isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 
 	for idx, key := range keys {
 		maskedKey := "..." + key[len(key)-6:]
@@ -1111,6 +1112,7 @@ func extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang string, keys 
 func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
 	client := &http.Client{Timeout: 25 * time.Second}
 	var lastErr error
+	isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 
 	for idx, key := range keys {
 		maskedKey := "..." + key[len(key)-6:]
@@ -1195,6 +1197,11 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
 			}
 
+			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
+			if mimeStr == "" || mimeStr == "<nil>" {
+				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
+			}
+
 			// فیلتر تصاویر و استوری‌برد
 			if strings.Contains(mimeStr, "image") || strings.Contains(mimeStr, "webp") || strings.Contains(u, "storyboard") || strings.Contains(u, "mime=image") || strings.Contains(qStr, "storyboard") {
 				continue
@@ -1244,7 +1251,6 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 			continue
 		}
 
-		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if audioURL == "" {
 				audioURL = videoURL
@@ -1286,6 +1292,7 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
 	client := &http.Client{Timeout: 25 * time.Second}
 	var lastErr error
+	isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 
 	for idx, key := range keys {
 		maskedKey := "..." + key[len(key)-6:]
@@ -1365,6 +1372,11 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 				continue
 			}
 
+			qStr := strings.ToLower(fmt.Sprintf("%v", im["quality"]))
+			if qStr == "" || qStr == "<nil>" {
+				qStr = strings.ToLower(fmt.Sprintf("%v", im["qualityLabel"]))
+			}
+
 			mimeStr := strings.ToLower(fmt.Sprintf("%v", im["mimeType"]))
 			if mimeStr == "" || mimeStr == "<nil>" {
 				mimeStr = strings.ToLower(fmt.Sprintf("%v", im["type"]))
@@ -1419,7 +1431,6 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 			continue
 		}
 
-		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if audioURL == "" {
 				audioURL = videoURL
@@ -1884,6 +1895,7 @@ func extractFromYouTubeQuickVideoDownloader(videoID, quality, audioLang string, 
 func extractFromYouTube138(videoID, quality, audioLang string, keys []string, token string) (*ExtractedMedia, error) {
 	client := &http.Client{Timeout: 25 * time.Second}
 	var lastErr error
+	isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 
 	for idx, key := range keys {
 		maskedKey := "..." + key[len(key)-6:]
@@ -2019,7 +2031,6 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 			continue
 		}
 
-		isAudioOnly := (quality == "audio" || quality == "mp3" || quality == "m4a")
 		if isAudioOnly {
 			if audioURL == "" {
 				audioURL = videoURL
