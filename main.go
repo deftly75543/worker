@@ -476,6 +476,32 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Endpoint: /metadata یا /api/metadata (استخراج آنی متادیتا و حجم‌ها)
+	if action == "metadata" || path == "/metadata" || path == "/api/metadata" {
+		videoId := r.URL.Query().Get("videoId")
+		if videoId == "" {
+			videoId = r.URL.Query().Get("video_id")
+		}
+		if videoId == "" {
+			videoId = r.URL.Query().Get("url")
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if videoId == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": "videoId is required"})
+			return
+		}
+		meta, err := ExtractVideoMetadata(videoId)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"data":   meta,
+		})
+		return
+	}
+
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

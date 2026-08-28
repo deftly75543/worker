@@ -2183,3 +2183,140 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 
 	return nil, lastErr
 }
+
+// ExtractVideoMetadata استخراج مستقیم و جامع مشخصات، کیفیت‌ها و حجم‌های واقعی ویدیو در ورکر
+func ExtractVideoMetadata(videoURL string) (map[string]any, error) {
+	vid := ExtractVideoID(videoURL)
+	if vid == "" {
+		vid = videoURL
+	}
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	req, err := http.NewRequest("GET", "https://www.youtube.com/watch?v="+vid, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cookie", "SOCS=CAESEwgDEgk2OTQ0MTA1ODQaAmVuIAEaBgiA_LyaBg; CONSENT=YES+cb.20210328-17-p0.en+FX+478")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	html := string(bodyBytes)
+
+	re := regexp.MustCompile(`ytInitialPlayerResponse\s*=\s*({.+?});(?:var|\n|</script>)`)
+	m := re.FindStringSubmatch(html)
+	if len(m) < 2 {
+		return nil, fmt.Errorf("player response not found")
+	}
+
+	var pData map[string]any
+	if err := json.Unmarshal([]byte(m[1]), &pData); err != nil {
+		return nil, err
+	}
+
+	vd, _ := pData["videoDetails"].(map[string]any)
+	title, _ := vd["title"].(string)
+	author, _ := vd["author"].(string)
+	lenSecStr, _ := vd["lengthSeconds"].(string)
+	duration, _ := strconv.Atoi(lenSecStr)
+
+	streamingData, _ := pData["streamingData"].(map[string]any)
+	var formats []map[string]any
+	if afs, ok := streamingData["adaptiveFormats"].([]any); ok {
+		for _, f := range afs {
+			if fm, ok := f.(map[string]any); ok {
+				formats = append(formats, fm)
+			}
+		}
+	}
+	if fs, ok := streamingData["formats"].([]any); ok {
+		for _, f := range fs {
+			if fm, ok := f.(map[string]any); ok {
+				formats = append(formats, fm)
+			}
+		}
+	}
+
+	qualities := []string{}
+	sizes := make(map[string]string)
+	seen := make(map[string]bool)
+
+	for _, f := range formats {
+		ql, _ := f["qualityLabel"].(string)
+		if ql == "" {
+			ql, _ = f["quality"].(string)
+		}
+		ql = strings.ToLower(strings.TrimSpace(ql))
+		mime, _ := f["mimeType"].(string)
+		mime = strings.ToLower(mime)
+		if strings.Contains(mime, "image") || strings.Contains(mime, "webp") {
+			continue
+		}
+
+		fps := 30
+		if fpsVal, ok := f["fps"].(float64); ok {
+			fps = int(fpsVal)
+		}
+
+		cl := int64(0)
+		if clStr, ok := f["contentLength"].(string); ok {
+			cl, _ = strconv.ParseInt(clStr, 10, 64)
+		}
+
+		tag := ""
+		if strings.Contains(ql, "2160") || strings.Contains(ql, "4k") {
+			if fps >= 50 { tag = "2160p60" } else { tag = "2160" }
+		} else if strings.Contains(ql, "1440") || strings.Contains(ql, "2k") {
+			if fps >= 50 { tag = "1440p60" } else { tag = "1440" }
+		} else if strings.Contains(ql, "1080") {
+			if fps >= 50 || strings.Contains(ql, "60") { tag = "1080p60" } else { tag = "1080" }
+		} else if strings.Contains(ql, "720") {
+			if fps >= 50 || strings.Contains(ql, "60") { tag = "720p60" } else { tag = "720" }
+		} else if strings.Contains(ql, "480") {
+			tag = "480"
+		} else if strings.Contains(ql, "360") {
+			tag = "360"
+		} else if strings.Contains(ql, "240") {
+			tag = "240"
+		} else if strings.Contains(mime, "audio") || strings.Contains(ql, "audio") {
+			tag = "audio"
+		}
+
+		if tag != "" {
+			if cl > 0 && sizes[tag] == "" {
+				mb := float64(cl) / (1024 * 1024)
+				if mb >= 1000 {
+					sizes[tag] = fmt.Sprintf("~%.2f GB", mb/1024)
+				} else {
+					sizes[tag] = fmt.Sprintf("~%.1f MB", mb)
+				}
+			}
+			if tag != "audio" && !seen[tag] {
+				seen[tag] = true
+				qualities = append(qualities, tag)
+			}
+		}
+	}
+
+	if len(qualities) == 0 {
+		qualities = []string{"1080", "720", "480", "360"}
+	}
+	qualities = append(qualities, "audio")
+
+	return map[string]any{
+		"video_id":     vid,
+		"title":        title,
+		"author":       author,
+		"duration":     duration,
+		"thumbnail":    fmt.Sprintf("https://img.youtube.com/vi/%s/hqdefault.jpg", vid),
+		"qualities":    qualities,
+		"audio_tracks": []any{},
+		"sizes":        sizes,
+	}, nil
+}
