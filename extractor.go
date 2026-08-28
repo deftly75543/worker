@@ -444,49 +444,51 @@ func ExtractFromRapidAPI(rawURL, quality, audioLang, customKeys, token string) (
 		return cloudMedia, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "Cloud Api Hub provider failed. Falling back to YouTube Info & Download API provider...")
+	Logger.Warn("EXTRACTOR", token, "Cloud Api Hub provider failed (%v). Falling back to YouTube Info & Download API provider...", cloudErr)
 	infoMedia, infoErr := extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang, keys, token)
 	if infoErr == nil && infoMedia != nil {
 		return infoMedia, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "YouTube Info & Download API failed. Falling back to YouTube Video And Shorts Downloader provider...")
+	Logger.Warn("EXTRACTOR", token, "YouTube Info & Download API failed (%v). Falling back to YouTube Video And Shorts Downloader provider...", infoErr)
 	shortsMedia, shortsErr := extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang, keys, token)
 	if shortsErr == nil && shortsMedia != nil {
 		return shortsMedia, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader failed. Falling back to YouTube Video And Shorts Downloader V2 provider...")
+	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader failed (%v). Falling back to YouTube Video And Shorts Downloader V2 provider...", shortsErr)
 	v2Media, v2Err := extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang, keys, token)
 	if v2Err == nil && v2Media != nil {
 		return v2Media, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader V2 failed. Falling back to YouTube MP4/MP3 Downloader provider...")
+	Logger.Warn("EXTRACTOR", token, "YouTube Video And Shorts Downloader V2 failed (%v). Falling back to YouTube MP4/MP3 Downloader provider...", v2Err)
 	mp4Media, mp4Err := extractFromYouTubeMp4Mp3Downloader(videoID, quality, audioLang, keys, token)
 	if mp4Err == nil && mp4Media != nil {
 		return mp4Media, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "YouTube MP4/MP3 Downloader failed. Falling back to Ziyotech Youtube Downloader API provider...")
+	Logger.Warn("EXTRACTOR", token, "YouTube MP4/MP3 Downloader failed (%v). Falling back to Ziyotech Youtube Downloader API provider...", mp4Err)
 	ziyoMedia, ziyoErr := extractFromZiyotech(videoID, quality, audioLang, keys, token)
 	if ziyoErr == nil && ziyoMedia != nil {
 		return ziyoMedia, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "Ziyotech API failed. Falling back to YouTube Quick Video Downloader provider...")
+	Logger.Warn("EXTRACTOR", token, "Ziyotech API failed (%v). Falling back to YouTube Quick Video Downloader provider...", ziyoErr)
 	quickMedia, quickErr := extractFromYouTubeQuickVideoDownloader(videoID, quality, audioLang, keys, token)
 	if quickErr == nil && quickMedia != nil {
 		return quickMedia, nil
 	}
 
-	Logger.Warn("EXTRACTOR", token, "YouTube Quick Video Downloader failed. Falling back to YouTube138 API provider...")
+	Logger.Warn("EXTRACTOR", token, "YouTube Quick Video Downloader failed (%v). Falling back to YouTube138 API provider...", quickErr)
 	yt138Media, yt138Err := extractFromYouTube138(videoID, quality, audioLang, keys, token)
 	if yt138Err == nil && yt138Media != nil {
 		return yt138Media, nil
 	}
 
-
+	if yt138Err != nil {
+		lastErr = yt138Err
+	}
 
 	if lastErr != nil {
 		Logger.Error("EXTRACTOR", token, "All RapidAPI providers and fallbacks exhausted. Last error: %v", lastErr)
@@ -1099,6 +1101,15 @@ func extractFromYouTubeVideoAndShortsDownloader(videoID, quality, audioLang stri
 			formatItems = v
 		} else if f, ok := rawMap["formats"].([]any); ok {
 			formatItems = f
+		} else if dMap, ok := rawMap["data"].(map[string]any); ok {
+			if t, ok := dMap["title"].(string); ok && t != "" {
+				title = t
+			}
+			if dv, ok := dMap["videos"].([]any); ok {
+				formatItems = dv
+			} else if df, ok := dMap["formats"].([]any); ok {
+				formatItems = df
+			}
 		} else if d, ok := rawMap["data"].([]any); ok {
 			formatItems = d
 		}
@@ -1242,6 +1253,15 @@ func extractFromYouTubeVideoAndShortsDownloaderV2(videoID, quality, audioLang st
 			formatItems = v
 		} else if f, ok := rawMap["formats"].([]any); ok {
 			formatItems = f
+		} else if dMap, ok := rawMap["data"].(map[string]any); ok {
+			if t, ok := dMap["title"].(string); ok && t != "" {
+				title = t
+			}
+			if dv, ok := dMap["videos"].([]any); ok {
+				formatItems = dv
+			} else if df, ok := dMap["formats"].([]any); ok {
+				formatItems = df
+			}
 		} else if d, ok := rawMap["data"].([]any); ok {
 			formatItems = d
 		}
