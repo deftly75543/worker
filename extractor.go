@@ -731,8 +731,8 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 			continue
 		}
 
-		var rawMap map[string]any
-		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		var rawVal any
+		err = json.NewDecoder(resp.Body).Decode(&rawVal)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
@@ -740,26 +740,30 @@ func extractFromCloudApiHub(videoID, quality, audioLang string, keys []string, t
 		}
 
 		title := fmt.Sprintf("YouTube Video %s", videoID)
-		if t, ok := rawMap["title"].(string); ok && t != "" {
-			title = t
-		}
-
 		var formatItems []any
-		if f, ok := rawMap["formats"].([]any); ok {
-			formatItems = f
-		} else if dMap, ok := rawMap["data"].(map[string]any); ok {
-			if t, ok := dMap["title"].(string); ok && t != "" {
+
+		if arr, ok := rawVal.([]any); ok {
+			formatItems = arr
+		} else if rawMap, ok := rawVal.(map[string]any); ok {
+			if t, ok := rawMap["title"].(string); ok && t != "" {
 				title = t
 			}
-			if df, ok := dMap["formats"].([]any); ok {
-				formatItems = df
-			} else if dv, ok := dMap["videos"].([]any); ok {
-				formatItems = dv
+			if f, ok := rawMap["formats"].([]any); ok {
+				formatItems = f
+			} else if dMap, ok := rawMap["data"].(map[string]any); ok {
+				if t, ok := dMap["title"].(string); ok && t != "" {
+					title = t
+				}
+				if df, ok := dMap["formats"].([]any); ok {
+					formatItems = df
+				} else if dv, ok := dMap["videos"].([]any); ok {
+					formatItems = dv
+				}
+			} else if d, ok := rawMap["data"].([]any); ok {
+				formatItems = d
+			} else if v, ok := rawMap["videos"].([]any); ok {
+				formatItems = v
 			}
-		} else if d, ok := rawMap["data"].([]any); ok {
-			formatItems = d
-		} else if v, ok := rawMap["videos"].([]any); ok {
-			formatItems = v
 		}
 
 		var videoURL, audioURL string
@@ -974,7 +978,7 @@ func extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang string, keys 
 		Logger.Info("EXTRACTOR", token, "Trying YouTube Info & Download API with key #%d (%s)", idx+1, maskedKey)
 
 		vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
-		reqURL := fmt.Sprintf("https://youtube-info-download-api.p.rapidapi.com/ajax/download.php?copyright=0&format=%s&url=%s&audio_quality=128&no_merge=false",
+		reqURL := fmt.Sprintf("https://youtube-info-download-api.p.rapidapi.com/ajax/download.php?format=%s&add_info=0&url=%s&audio_quality=128&allow_extended_duration=false&no_merge=false&audio_language=en",
 			url.QueryEscape(format), url.QueryEscape(vURL))
 
 		req, err := http.NewRequest("GET", reqURL, nil)
@@ -992,13 +996,14 @@ func extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang string, keys 
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			resp.Body.Close()
-			lastErr = fmt.Errorf("youtube-info-download-api returned HTTP %d", resp.StatusCode)
+			lastErr = fmt.Errorf("youtube-info-download-api returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 			continue
 		}
 
-		var rawMap map[string]any
-		err = json.NewDecoder(resp.Body).Decode(&rawMap)
+		var rawVal any
+		err = json.NewDecoder(resp.Body).Decode(&rawVal)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
@@ -1006,19 +1011,39 @@ func extractFromYouTubeInfoDownloadAPI(videoID, quality, audioLang string, keys 
 		}
 
 		title := fmt.Sprintf("YouTube Video %s", videoID)
-		if t, ok := rawMap["title"].(string); ok && t != "" {
-			title = t
-		}
-
 		streamURL := ""
-		if u, ok := rawMap["url"].(string); ok && u != "" {
-			streamURL = u
-		} else if l, ok := rawMap["link"].(string); ok && l != "" {
-			streamURL = l
-		} else if d, ok := rawMap["download_url"].(string); ok && d != "" {
-			streamURL = d
-		} else if du, ok := rawMap["downloadUrl"].(string); ok && du != "" {
-			streamURL = du
+
+		if rawMap, ok := rawVal.(map[string]any); ok {
+			for _, k := range []string{"url", "link", "download_url", "downloadUrl", "download", "file", "media_url", "direct_link"} {
+				if s, ok := rawMap[k].(string); ok && s != "" {
+					streamURL = s
+					break
+				}
+			}
+			if t, ok := rawMap["title"].(string); ok && t != "" {
+				title = t
+			}
+			if streamURL == "" {
+				if dMap, ok := rawMap["data"].(map[string]any); ok {
+					for _, k := range []string{"url", "link", "download_url", "downloadUrl", "download", "file"} {
+						if s, ok := dMap[k].(string); ok && s != "" {
+							streamURL = s
+							break
+						}
+					}
+					if t, ok := dMap["title"].(string); ok && t != "" {
+						title = t
+					}
+				}
+				if rMap, ok := rawMap["result"].(map[string]any); ok {
+					for _, k := range []string{"url", "link", "download_url", "downloadUrl", "download"} {
+						if s, ok := rMap[k].(string); ok && s != "" {
+							streamURL = s
+							break
+						}
+					}
+				}
+			}
 		}
 
 		if streamURL != "" {
@@ -1469,54 +1494,80 @@ func extractFromZiyotech(videoID, quality, audioLang string, keys []string, toke
 		maskedKey := "..." + key[len(key)-6:]
 		Logger.Info("EXTRACTOR", token, "Trying Ziyotech Youtube Downloader API with key #%d (%s)", idx+1, maskedKey)
 
-		vURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
-		formData := url.Values{}
-		formData.Set("url", vURL)
-		formData.Set("mode", "auto")
-
-		req, err := http.NewRequest("POST", "https://ziyotech-youtube-downloader-api.p.rapidapi.com/rapid/api/", strings.NewReader(formData.Encode()))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("x-rapidapi-host", "ziyotech-youtube-downloader-api.p.rapidapi.com")
-		req.Header.Set("x-rapidapi-key", key)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("ziyotech api returned HTTP %d", resp.StatusCode)
-			continue
+		urlCandidates := []string{
+			fmt.Sprintf("https://youtu.be/%s", videoID),
+			fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID),
 		}
 
-		var rawMap map[string]any
-		err = json.NewDecoder(resp.Body).Decode(&rawMap)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
+		var rawVal any
+		var lastStatus int
+
+		for _, vURL := range urlCandidates {
+			formData := url.Values{}
+			formData.Set("url", vURL)
+			formData.Set("mode", "auto")
+
+			req, err := http.NewRequest("POST", "https://ziyotech-youtube-downloader-api.p.rapidapi.com/rapid/api/", strings.NewReader(formData.Encode()))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("x-rapidapi-host", "ziyotech-youtube-downloader-api.p.rapidapi.com")
+			req.Header.Set("x-rapidapi-key", key)
+			req.Header.Set("Accept", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			lastStatus = resp.StatusCode
+			if resp.StatusCode == http.StatusOK {
+				err = json.NewDecoder(resp.Body).Decode(&rawVal)
+				resp.Body.Close()
+				if err == nil {
+					break
+				}
+			} else {
+				resp.Body.Close()
+			}
+		}
+
+		if rawVal == nil {
+			lastErr = fmt.Errorf("ziyotech api returned HTTP %d", lastStatus)
 			continue
 		}
 
 		title := fmt.Sprintf("YouTube Video %s", videoID)
-		if t, ok := rawMap["title"].(string); ok && t != "" {
-			title = t
-		}
-
 		var formatItems []any
-		if m, ok := rawMap["media"].([]any); ok {
-			formatItems = m
-		} else if f, ok := rawMap["formats"].([]any); ok {
-			formatItems = f
-		} else if d, ok := rawMap["data"].([]any); ok {
-			formatItems = d
-		} else if v, ok := rawMap["videos"].([]any); ok {
-			formatItems = v
+
+		if arr, ok := rawVal.([]any); ok {
+			formatItems = arr
+		} else if rawMap, ok := rawVal.(map[string]any); ok {
+			if t, ok := rawMap["title"].(string); ok && t != "" {
+				title = t
+			}
+			if m, ok := rawMap["media"].([]any); ok {
+				formatItems = m
+			} else if f, ok := rawMap["formats"].([]any); ok {
+				formatItems = f
+			} else if dMap, ok := rawMap["data"].(map[string]any); ok {
+				if t, ok := dMap["title"].(string); ok && t != "" {
+					title = t
+				}
+				if m, ok := dMap["media"].([]any); ok {
+					formatItems = m
+				} else if df, ok := dMap["formats"].([]any); ok {
+					formatItems = df
+				} else if dv, ok := dMap["videos"].([]any); ok {
+					formatItems = dv
+				}
+			} else if d, ok := rawMap["data"].([]any); ok {
+				formatItems = d
+			} else if v, ok := rawMap["videos"].([]any); ok {
+				formatItems = v
+			}
 		}
 
 		var videoURL, audioURL string
@@ -1761,44 +1812,67 @@ func extractFromYouTube138(videoID, quality, audioLang string, keys []string, to
 		maskedKey := "..." + key[len(key)-6:]
 		Logger.Info("EXTRACTOR", token, "Trying YouTube138 API with key #%d (%s)", idx+1, maskedKey)
 
-		reqURL := fmt.Sprintf("https://youtube138.p.rapidapi.com/video/streaming-data/?id=%s", url.QueryEscape(videoID))
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("x-rapidapi-host", "youtube138.p.rapidapi.com")
-		req.Header.Set("x-rapidapi-key", key)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			resp.Body.Close()
-			Logger.Warn("EXTRACTOR", token, "YouTube138 API returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-			lastErr = fmt.Errorf("youtube138 api returned HTTP %d", resp.StatusCode)
-			continue
+		endpoints := []string{
+			fmt.Sprintf("https://youtube138.p.rapidapi.com/video/details/?id=%s&hl=en&gl=US", url.QueryEscape(videoID)),
+			fmt.Sprintf("https://youtube138.p.rapidapi.com/video/streaming-data/?id=%s", url.QueryEscape(videoID)),
 		}
 
 		var rawMap map[string]any
-		err = json.NewDecoder(resp.Body).Decode(&rawMap)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
+		var lastStatus int
+
+		for _, reqURL := range endpoints {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			req.Header.Set("x-rapidapi-host", "youtube138.p.rapidapi.com")
+			req.Header.Set("x-rapidapi-key", key)
+			req.Header.Set("Accept", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			lastStatus = resp.StatusCode
+			if resp.StatusCode == http.StatusOK {
+				err = json.NewDecoder(resp.Body).Decode(&rawMap)
+				resp.Body.Close()
+				if err == nil && rawMap != nil {
+					break
+				}
+			} else {
+				bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+				resp.Body.Close()
+				Logger.Warn("EXTRACTOR", token, "YouTube138 URL (%s) returned HTTP %d: %s", reqURL, resp.StatusCode, string(bodyBytes))
+			}
+		}
+
+		if rawMap == nil {
+			lastErr = fmt.Errorf("youtube138 api returned HTTP %d", lastStatus)
 			continue
 		}
 
 		title := fmt.Sprintf("YouTube Video %s", videoID)
+		if t, ok := rawMap["title"].(string); ok && t != "" {
+			title = t
+		}
+
 		var formatItems []any
 		if af, ok := rawMap["adaptiveFormats"].([]any); ok {
 			formatItems = append(formatItems, af...)
 		}
 		if f, ok := rawMap["formats"].([]any); ok {
 			formatItems = append(formatItems, f...)
+		}
+		if sd, ok := rawMap["streamingData"].(map[string]any); ok {
+			if af, ok := sd["adaptiveFormats"].([]any); ok {
+				formatItems = append(formatItems, af...)
+			}
+			if f, ok := sd["formats"].([]any); ok {
+				formatItems = append(formatItems, f...)
+			}
 		}
 
 		var videoURL, audioURL string
